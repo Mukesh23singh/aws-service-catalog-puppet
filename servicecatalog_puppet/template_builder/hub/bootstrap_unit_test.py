@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 
@@ -34,7 +34,7 @@ def test_codecommit_provider():
     )
 
     source_stage = actual_result.resources.get("Pipeline").Stages[0]
-    action = source_stage.Actions[1]
+    action = source_stage.Actions[0]
 
     # verify
     assert source_stage.Name == "Source"

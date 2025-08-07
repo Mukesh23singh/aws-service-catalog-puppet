@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 from unittest import skip
@@ -7,11 +7,13 @@ from servicecatalog_puppet.workflow import tasks_unit_tests_helper
 
 
 class SharePortfolioViaOrgsTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
-    manifest_file_path = "manifest_file_path"
     region = "region"
     portfolio = "portfolio"
-    puppet_account_id = "puppet_account_id"
     ou_to_share_with = "ou_to_share_with"
+    portfolio_task_reference = "portfolio_task_reference"
+    share_tag_options = True
+    share_principals = True
+    describe_portfolio_shares_task_ref = "describe_portfolio_shares_task_ref"
 
     def setUp(self) -> None:
         from servicecatalog_puppet.workflow.portfolio.sharing_management import (
@@ -21,11 +23,14 @@ class SharePortfolioViaOrgsTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
         self.module = share_portfolio_via_orgs_task
 
         self.sut = self.module.SharePortfolioViaOrgsTask(
-            manifest_file_path=self.manifest_file_path,
+            **self.get_common_args(),
             region=self.region,
             portfolio=self.portfolio,
-            puppet_account_id=self.puppet_account_id,
             ou_to_share_with=self.ou_to_share_with,
+            portfolio_task_reference=self.portfolio_task_reference,
+            share_tag_options=self.share_tag_options,
+            share_principals=self.share_principals,
+            describe_portfolio_shares_task_ref=self.describe_portfolio_shares_task_ref,
         )
 
         self.wire_up_mocks()
@@ -37,23 +42,12 @@ class SharePortfolioViaOrgsTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
             "portfolio": self.portfolio,
             "region": self.region,
             "ou_to_share_with": self.ou_to_share_with,
+            "share_tag_options": self.share_tag_options,
+            "share_principals": self.share_principals,
         }
 
         # exercise
         actual_result = self.sut.params_for_results_display()
-
-        # verify
-        self.assertEqual(expected_result, actual_result)
-
-    def test_api_calls_used(self):
-        # setup
-        expected_result = [
-            f"servicecatalog.create_portfolio_share",
-            f"servicecatalog.describe_portfolio_share_status",
-        ]
-
-        # exercise
-        actual_result = self.sut.api_calls_used()
 
         # verify
         self.assertEqual(expected_result, actual_result)

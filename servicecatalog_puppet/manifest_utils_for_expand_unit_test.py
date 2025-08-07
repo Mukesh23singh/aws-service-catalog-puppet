@@ -1,8 +1,8 @@
-# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: Apache-2.0
 import unittest
-from unittest.mock import MagicMock
 from copy import deepcopy
+from unittest.mock import MagicMock
 
 from servicecatalog_puppet import constants
 
@@ -15,21 +15,27 @@ class TestManifestForExpand(unittest.TestCase):
         "account_id": "012345678910",
         "default_region": "eu-west-1",
         "name": "accounta",
-        "regions_enabled": ["eu-west-2",],
+        "regions_enabled": [
+            "eu-west-2",
+        ],
         "tags": ["group:A"],
     }
     account_b = {
         "account_id": "009876543210",
         "default_region": "us-west-1",
         "name": "accountb",
-        "regions_enabled": ["us-west-2",],
+        "regions_enabled": [
+            "us-west-2",
+        ],
         "tags": ["group:B"],
     }
     account_c = {
         "account_id": "432100098765",
         "default_region": "ap-west-1",
         "name": "accountc",
-        "regions_enabled": ["ap-west-2",],
+        "regions_enabled": [
+            "ap-west-2",
+        ],
         "tags": ["group:C"],
     }
     accounts = [
@@ -42,21 +48,28 @@ class TestManifestForExpand(unittest.TestCase):
         "ou": "ou-aaaa-aaaaaaaa",
         "default_region": "eu-west-1",
         "name": "oua",
-        "regions_enabled": ["eu-west-2",],
+        "regions_enabled": [
+            "eu-west-2",
+        ],
         "tags": ["group:A"],
     }
     account_ou_b = {
         "ou": "/OrgUnitB",
+        "ou_name": "/OrgUnitB",
         "default_region": "us-west-1",
         "name": "oub",
-        "regions_enabled": ["us-west-2",],
+        "regions_enabled": [
+            "us-west-2",
+        ],
         "tags": ["group:B"],
     }
     account_ou_c = {
         "ou": "ou-aaaa-cccccccc",
         "default_region": "ap-west-1",
         "name": "ouc",
-        "regions_enabled": ["ap-west-2",],
+        "regions_enabled": [
+            "ap-west-2",
+        ],
         "tags": ["group:C"],
     }
 
@@ -110,7 +123,7 @@ class TestManifestForExpand(unittest.TestCase):
         )
 
         # exercise
-        actual_results = self.sut(expanded_manifest, self.client_mock)
+        _, actual_results = self.sut(expanded_manifest, self.client_mock)
 
         # verify
         self.assertDictEqual(expected_results, actual_results)
@@ -140,6 +153,7 @@ class TestManifestForExpand(unittest.TestCase):
         account_b["email"] = f"{account_b['account_id']}@test.com"
         account_b["organization"] = self.organization_id
         account_b["expanded_from"] = "ou-aaaa-bbbbbbbb"
+        account_b["ou_name"] = "/OrgUnitB"
         account_b["name"] = account_b["account_id"]
         accounts.append(account_b)
 
@@ -180,7 +194,7 @@ class TestManifestForExpand(unittest.TestCase):
         self.client_mock.convert_path_to_ou = MagicMock(return_value="ou-aaaa-bbbbbbbb")
 
         # exercise
-        actual_results = self.sut(expanded_manifest, self.client_mock)
+        _, actual_results = self.sut(expanded_manifest, self.client_mock)
 
         # verify
         self.assertDictEqual(expected_results, actual_results)

@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import io
@@ -10,10 +10,10 @@ import botocore
 import click
 from betterboto import client as betterboto_client
 
-from servicecatalog_puppet import config, constants
+from servicecatalog_puppet import config, constants, serialisation_utils
 from servicecatalog_puppet.template_builder.hub import (
-    bootstrap_region as hub_bootstrap_region,
     bootstrap as hub_bootstrap,
+    bootstrap_region as hub_bootstrap_region,
 )
 
 
@@ -27,6 +27,7 @@ def bootstrap(
     puppet_provisioning_role_permissions_boundary,
     cloud_formation_deploy_role_permissions_boundary,
     deploy_environment_compute_type,
+    spoke_deploy_environment_compute_type,
     deploy_num_workers,
     source_provider,
     owner,
@@ -43,21 +44,35 @@ def bootstrap(
     scm_object_key,
     scm_skip_creation_of_repo,
     should_validate,
+    custom_source_action_git_url,
+    custom_source_action_git_web_hook_ip_address,
+    custom_source_action_custom_action_type_version,
+    custom_source_action_custom_action_type_provider,
 ):
     click.echo("Starting bootstrap")
-    should_use_eventbridge = config.get_should_use_eventbridge(
-        puppet_account_id, os.environ.get("AWS_DEFAULT_REGION")
+    should_use_eventbridge = config.get_should_use_eventbridge()
+    initialiser_stack_tags = serialisation_utils.json_loads(
+        config.get_initialiser_stack_tags()
     )
     if should_use_eventbridge:
         with betterboto_client.ClientContextManager("events") as events:
             try:
                 events.describe_event_bus(Name=constants.EVENT_BUS_NAME)
             except events.exceptions.ResourceNotFoundException:
-                events.create_event_bus(Name=constants.EVENT_BUS_NAME,)
+                events.create_event_bus(
+                    Name=constants.EVENT_BUS_NAME,
+                )
 
-    all_regions = config.get_regions(
-        puppet_account_id, os.environ.get("AWS_DEFAULT_REGION")
-    )
+    all_regions = config.get_regions()
+    with betterboto_client.MultiRegionClientContextManager(
+        "events", all_regions
+    ) as clients:
+        for _, client in clients.items():
+            try:
+                client.describe_event_bus(Name=constants.EVENT_BUS_NAME)
+            except client.exceptions.ResourceNotFoundException:
+                client.create_event_bus(Name=constants.EVENT_BUS_NAME)
+
     with betterboto_client.MultiRegionClientContextManager(
         "cloudformation", all_regions
     ) as clients:
@@ -82,7 +97,13 @@ def bootstrap(
                     "UsePreviousValue": False,
                 },
             ],
-            "Tags": [{"Key": "ServiceCatalogPuppet:Actor", "Value": "Framework",}],
+            "Tags": [
+                {
+                    "Key": "ServiceCatalogPuppet:Actor",
+                    "Value": "Framework",
+                }
+            ]
+            + initialiser_stack_tags,
         }
         for client_region, client in clients.items():
             process = Thread(
@@ -141,14 +162,25 @@ def bootstrap(
                 },
             }
         )
+    elif source_provider.lower() == "custom":
+        source_args.update(
+            {
+                "Configuration": {
+                    "Owner": "Custom",
+                    "GitUrl": custom_source_action_git_url,
+                    "Branch": branch,
+                    "GitWebHookIpAddress": custom_source_action_git_web_hook_ip_address,
+                    "CustomActionTypeVersion": custom_source_action_custom_action_type_version,
+                    "CustomActionTypeProvider": custom_source_action_custom_action_type_provider,
+                },
+            }
+        )
 
     template = hub_bootstrap.get_template(
         constants.VERSION,
         all_regions,
         source_args,
-        config.is_caching_enabled(
-            puppet_account_id, os.environ.get("AWS_DEFAULT_REGION")
-        ),
+        config.is_caching_enabled(),
         with_manual_approvals,
         scm_skip_creation_of_repo,
         should_validate,
@@ -210,6 +242,11 @@ def bootstrap(
                 "UsePreviousValue": False,
             },
             {
+                "ParameterKey": "SpokeDeployEnvironmentComputeType",
+                "ParameterValue": spoke_deploy_environment_compute_type,
+                "UsePreviousValue": False,
+            },
+            {
                 "ParameterKey": "DeployNumWorkers",
                 "ParameterValue": str(deploy_num_workers),
                 "UsePreviousValue": False,
@@ -224,7 +261,19 @@ def bootstrap(
                 "ParameterValue": puppet_role_path,
                 "UsePreviousValue": False,
             },
+            {
+                "ParameterKey": "AWSSTSRegionalEndpoints",
+                "ParameterValue": config.get_aws_sts_regional_endpoints(),
+                "UsePreviousValue": False,
+            },
         ],
+        "Tags": [
+            {
+                "Key": "ServiceCatalogPuppet:Actor",
+                "Value": "Framework",
+            }
+        ]
+        + initialiser_stack_tags,
     }
     with betterboto_client.ClientContextManager("cloudformation") as cloudformation:
         click.echo("Creating {}".format(constants.BOOTSTRAP_STACK_NAME))

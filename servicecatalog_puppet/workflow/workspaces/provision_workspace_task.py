@@ -1,27 +1,16 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import io
-import json
 import zipfile
 
 import luigi
 
-from servicecatalog_puppet import constants
-from servicecatalog_puppet.workflow import dependency
-from servicecatalog_puppet.workflow.general import get_ssm_param_task
-from servicecatalog_puppet.workflow.manifest import manifest_mixin
-from servicecatalog_puppet.workflow.workspaces import Limits
-from servicecatalog_puppet.workflow.workspaces import prepare_account_for_workspace_task
-from servicecatalog_puppet.workflow.workspaces import workspace_base_task
+from servicecatalog_puppet import constants, serialisation_utils
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class ProvisionWorkspaceTask(
-    workspace_base_task.WorkspaceBaseTask,
-    get_ssm_param_task.PuppetTaskWithParameters,
-    manifest_mixin.ManifestMixen,
-    dependency.DependenciesMixin,
-):
+class ProvisionWorkspaceTask(tasks.TaskWithParameters):
     workspace_name = luigi.Parameter()
     region = luigi.Parameter()
     account_id = luigi.Parameter()
@@ -29,8 +18,6 @@ class ProvisionWorkspaceTask(
     bucket = luigi.Parameter()
     key = luigi.Parameter()
     version_id = luigi.Parameter()
-
-    puppet_account_id = luigi.Parameter()
 
     ssm_param_inputs = luigi.ListParameter(default=[], significant=False)
 
@@ -44,6 +31,14 @@ class ProvisionWorkspaceTask(
     requested_priority = luigi.IntParameter(significant=False, default=0)
 
     execution = luigi.Parameter()
+    manifest_file_path = luigi.Parameter()
+
+    section_name = constants.WORKSPACES
+    cachable_level = constants.CACHE_LEVEL_RUN
+
+    @property
+    def item_name(self):
+        return self.workspace_name
 
     def params_for_results_display(self):
         return {
@@ -51,26 +46,7 @@ class ProvisionWorkspaceTask(
             "workspace_name": self.workspace_name,
             "region": self.region,
             "account_id": self.account_id,
-            "cache_invalidator": self.cache_invalidator,
         }
-
-    def requires(self):
-        requirements = {
-            "section_dependencies": self.get_section_dependencies(),
-            "ssm_params": self.get_parameters_tasks(),
-        }
-        if not self.is_running_in_spoke():
-            requirements[
-                "account_ready"
-            ] = prepare_account_for_workspace_task.PrepareAccountForWorkspaceTask(
-                puppet_account_id=self.puppet_account_id, account_id=self.account_id,
-            )
-        return requirements
-
-    def resources_used(self):
-        return [
-            (self.account_id, Limits.CODEBUILD_CONCURRENT_PROJECTS),
-        ]
 
     def run(self):
         with self.hub_client("s3") as s3:
@@ -86,15 +62,27 @@ class ProvisionWorkspaceTask(
                 .read()
             )
 
-        options = json.loads(options)
+        options = serialisation_utils.json_loads(options)
 
         zip_file_path = f"s3://{self.bucket}/{self.key}"
         state_file_path = f"s3://sc-puppet-state-{self.account_id}/workspace/{self.workspace_name}/{self.account_id}/{self.region}.zip"
         with self.spoke_client("codebuild") as codebuild:
             parameters_to_use = [
-                dict(name="TARGET_ACCOUNT", value=self.account_id, type="PLAINTEXT",),
-                dict(name="STATE_FILE", value=state_file_path, type="PLAINTEXT",),
-                dict(name="ZIP", value=zip_file_path, type="PLAINTEXT",),
+                dict(
+                    name="TARGET_ACCOUNT",
+                    value=self.account_id,
+                    type="PLAINTEXT",
+                ),
+                dict(
+                    name="STATE_FILE",
+                    value=state_file_path,
+                    type="PLAINTEXT",
+                ),
+                dict(
+                    name="ZIP",
+                    value=zip_file_path,
+                    type="PLAINTEXT",
+                ),
             ]
 
             for parameter_name, parameter_value in self.get_parameter_values().items():
@@ -125,7 +113,7 @@ class ProvisionWorkspaceTask(
             with self.spoke_client("s3") as s3:
                 output_bucket = f"sc-puppet-state-{self.account_id}"
                 output_key = f"terraform-executions/{build.get('id').split(':')[1]}/artifacts-execute/outputs.json"
-                outputs = json.loads(
+                outputs = serialisation_utils.json_loads(
                     s3.get_object(Bucket=output_bucket, Key=output_key)
                     .get("Body")
                     .read()
@@ -159,4 +147,4 @@ class ProvisionWorkspaceTask(
                                 f"Could not find {ssm_param_output.get('stack_output')} in the outputs"
                             )
 
-        self.write_output(self.params_for_results_display())
+        self.write_empty_output()

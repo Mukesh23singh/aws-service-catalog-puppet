@@ -1,37 +1,61 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import luigi
+import troposphere as t
+from troposphere import iam
 
-from servicecatalog_puppet import constants
-from servicecatalog_puppet.workflow import tasks
-from servicecatalog_puppet.workflow.stack import create_template_for_stack_task
+from servicecatalog_puppet import config, constants
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class PrepareAccountForWorkspaceTask(tasks.PuppetTask):
+class PrepareAccountForStackTask(tasks.TaskWithReference):
+    region = luigi.Parameter()
     account_id = luigi.Parameter()
+
+    cachable_level = constants.CACHE_LEVEL_PERMANENT
 
     def params_for_results_display(self):
         return {
+            "region": self.region,
             "account_id": self.account_id,
         }
 
-    def requires(self):
-        return create_template_for_stack_task.CreateTemplateForStackTask()
-
-    def api_calls_used(self):
-        return {
-            f"cloudformation.create_or_update_{self.account_id}": 1,
-        }
-
     def run(self):
-        template = self.input().open("r").read()
-        with self.spoke_client("cloudformation") as cloudformation:
+        puppet_version = constants.VERSION
+        description = f"""Bootstrap template used to configure spoke account for stack use
+                {{"version": "{puppet_version}", "framework": "servicecatalog-puppet", "role": "bootstrap-spoke-stack"}}"""
+
+        template = t.Template(Description=description)
+
+        template.add_resource(
+            iam.Role(
+                "PuppetStackRole",
+                RoleName="PuppetStackRole",
+                ManagedPolicyArns=[
+                    t.Sub("arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess")
+                ],
+                Path=config.get_puppet_role_path(),
+                AssumeRolePolicyDocument={
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Action": ["sts:AssumeRole"],
+                            "Effect": "Allow",
+                            "Principal": {"Service": ["cloudformation.amazonaws.com"]},
+                        }
+                    ],
+                },
+            )
+        )
+
+        with self.spoke_regional_client("cloudformation") as cloudformation:
             cloudformation.create_or_update(
                 StackName=constants.STACK_SPOKE_PREP_STACK_NAME,
-                TemplateBody=template,
+                TemplateBody=template.to_yaml(),
                 Capabilities=["CAPABILITY_NAMED_IAM"],
                 ShouldDeleteRollbackComplete=self.should_delete_rollback_complete_stacks,
+                Tags=self.initialiser_stack_tags,
             )
 
         self.write_output(self.params_for_results_display())

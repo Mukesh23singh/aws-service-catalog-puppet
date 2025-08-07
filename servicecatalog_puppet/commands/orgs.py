@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -7,7 +7,8 @@ import click
 from betterboto import client as betterboto_client
 from jinja2 import Template
 
-from servicecatalog_puppet import constants, asset_helpers
+from servicecatalog_puppet import asset_helpers, constants
+
 
 logger = logging.getLogger(constants.PUPPET_LOGGER_NAME)
 
@@ -23,14 +24,37 @@ def set_org_iam_role_arn(org_iam_role_arn):
     click.echo("Uploaded config")
 
 
-def bootstrap_org_master(puppet_account_id):
-    with betterboto_client.ClientContextManager("cloudformation",) as cloudformation:
+def set_org_scp_role_arn(org_iam_role_arn):
+    with betterboto_client.ClientContextManager("ssm") as ssm:
+        ssm.put_parameter(
+            Name=constants.CONFIG_PARAM_NAME_ORG_SCP_ROLE_ARN,
+            Type="String",
+            Value=org_iam_role_arn,
+            Overwrite=True,
+        )
+    click.echo("Uploaded config")
+
+
+def bootstrap_org_master(puppet_account_id, tag):
+    stack_name = f"{constants.BOOTSTRAP_STACK_NAME}-org-master-{puppet_account_id}"
+    template_name = f"{constants.BOOTSTRAP_STACK_NAME}-org-master.template.yaml"
+    bootstrap_master(puppet_account_id, tag, stack_name, template_name)
+
+
+def bootstrap_scp_master(puppet_account_id, tag):
+    stack_name = f"{constants.BOOTSTRAP_STACK_NAME}-scp-master-{puppet_account_id}"
+    template_name = f"{constants.BOOTSTRAP_STACK_NAME}-scp-master.template.yaml"
+    bootstrap_master(puppet_account_id, tag, stack_name, template_name)
+
+
+def bootstrap_master(puppet_account_id, tag, stack_name, template_name):
+    with betterboto_client.ClientContextManager(
+        "cloudformation",
+    ) as cloudformation:
         org_iam_role_arn = None
         logger.info("Starting bootstrap of org master")
-        stack_name = f"{constants.BOOTSTRAP_STACK_NAME}-org-master-{puppet_account_id}"
-        template = asset_helpers.read_from_site_packages(
-            f"{constants.BOOTSTRAP_STACK_NAME}-org-master.template.yaml"
-        )
+
+        template = asset_helpers.read_from_site_packages(template_name)
         template = Template(template).render(
             VERSION=constants.VERSION, puppet_account_id=puppet_account_id
         )
@@ -49,7 +73,13 @@ def bootstrap_org_master(puppet_account_id):
                     "UsePreviousValue": False,
                 },
             ],
-            "Tags": [{"Key": "ServiceCatalogPuppet:Actor", "Value": "Framework",}],
+            "Tags": [
+                {
+                    "Key": "ServiceCatalogPuppet:Actor",
+                    "Value": "Framework",
+                }
+            ]
+            + tag,
         }
         cloudformation.create_or_update(**args)
         response = cloudformation.describe_stacks(StackName=stack_name)

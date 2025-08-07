@@ -1,32 +1,26 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
+import re
+
 import luigi
+import troposphere as t
+from troposphere import servicecatalog
 
-from servicecatalog_puppet import config
-from servicecatalog_puppet import utils
-from servicecatalog_puppet.workflow.general import delete_cloud_formation_stack_task
-from servicecatalog_puppet.workflow.portfolio.portfolio_management import (
-    create_spoke_local_portfolio_task,
-)
-from servicecatalog_puppet.workflow.portfolio.portfolio_management import (
-    portfolio_management_task,
-)
+from servicecatalog_puppet import config, constants, utils
+from servicecatalog_puppet.workflow.dependencies import tasks
+from servicecatalog_puppet.workflow.portfolio.associations import association_utils
 
 
-class CreateAssociationsForSpokeLocalPortfolioTask(
-    portfolio_management_task.PortfolioManagementTask
-):
+class CreateAssociationsForSpokeLocalPortfolioTask(tasks.TaskWithReference):
+    portfolio_task_reference = luigi.Parameter()
     spoke_local_portfolio_name = luigi.Parameter()
     account_id = luigi.Parameter()
     region = luigi.Parameter()
     portfolio = luigi.Parameter()
-    puppet_account_id = luigi.Parameter()
-    organization = luigi.Parameter()
 
     associations = luigi.ListParameter(default=[])
-
-    sharing_mode = luigi.Parameter()
+    cachable_level = constants.CACHE_LEVEL_RUN
 
     def params_for_results_display(self):
         return {
@@ -35,63 +29,102 @@ class CreateAssociationsForSpokeLocalPortfolioTask(
             "portfolio": self.portfolio,
             "region": self.region,
             "account_id": self.account_id,
-            "cache_invalidator": self.cache_invalidator,
         }
-
-    def requires(self):
-        return {
-            "create_spoke_local_portfolio_task": create_spoke_local_portfolio_task.CreateSpokeLocalPortfolioTask(
-                manifest_file_path=self.manifest_file_path,
-                puppet_account_id=self.puppet_account_id,
-                account_id=self.account_id,
-                region=self.region,
-                portfolio=self.portfolio,
-                organization=self.organization,
-                sharing_mode=self.sharing_mode,
-            ),
-        }
-
-    def api_calls_used(self):
-        return [
-            f"cloudformation.create_or_update_{self.account_id}_{self.region}",
-            f"cloudformation.describe_stacks_{self.account_id}_{self.region}",
-        ]
 
     def run(self):
-        create_spoke_local_portfolio_task_input = self.load_from_input(
-            "create_spoke_local_portfolio_task"
+        portfolio_details = self.get_output_from_reference_dependency(
+            self.portfolio_task_reference
         )
-        portfolio_id = create_spoke_local_portfolio_task_input.get("Id")
-        self.info(f"using portfolio_id: {portfolio_id}")
+        portfolio_id = portfolio_details.get("Id")
 
-        yield delete_cloud_formation_stack_task.DeleteCloudFormationStackTask(
-            account_id=self.account_id,
-            region=self.region,
-            stack_name=f"associations-for-portfolio-{portfolio_id}",
-            nonce="forever",
-        )
+        haystack = "".join(self.associations)
+        used_wildcard = "*" in haystack
+        used_roles = ":role/" in haystack
+        used_users = ":user/" in haystack
+        used_groups = ":group/" in haystack
+
+        if used_wildcard:
+            roles = list()
+            users = list()
+            groups = list()
+            with self.spoke_regional_client("iam") as iam:
+                if used_roles:
+                    paginator = iam.get_paginator("list_roles")
+                    for page in paginator.paginate():
+                        roles += page.get("Roles", [])
+                if used_users:
+                    paginator = iam.get_paginator("list_users")
+                    for page in paginator.paginate():
+                        users += page.get("Users", [])
+                if used_groups:
+                    paginator = iam.get_paginator("list_groups")
+                    for page in paginator.paginate():
+                        groups += page.get("Groups", [])
+
+            associations_to_use = list()
+            for association in self.associations:
+                if "*" in association:
+                    association_as_a_regex = re.escape(
+                        association.replace("${AWS::AccountId}", self.account_id)
+                    ).replace("\\*", "(.*)")
+                    if ":role/" in association:
+                        for role_object in roles:
+                            role = role_object.get("Arn")
+                            if re.match(association_as_a_regex, role):
+                                associations_to_use.append(role)
+                    if ":user/" in association:
+                        for user_object in users:
+                            user = user_object.get("Arn")
+                            if re.match(association_as_a_regex, user):
+                                associations_to_use.append(user)
+                    if ":group/" in association:
+                        for group_object in groups:
+                            group = group_object.get("Arn")
+                            if re.match(association_as_a_regex, group):
+                                associations_to_use.append(group)
+                else:
+                    associations_to_use.append(association)
+        else:
+            associations_to_use = self.associations
 
         with self.spoke_regional_client("cloudformation") as cloudformation:
-            template = config.env.get_template("associations.template.yaml.j2").render(
-                portfolio={
-                    "DisplayName": self.portfolio,
-                    "Associations": self.associations,
-                },
-                portfolio_id=portfolio_id,
+            stack_name = (
+                association_utils.generate_stack_name_for_associations_by_item_name(
+                    self.portfolio
+                )
             )
-            stack_name = f"associations-for-{utils.slugify_for_cloudformation_stack_name(self.spoke_local_portfolio_name)}"
-            self.info(template)
-            cloudformation.create_or_update(
-                StackName=stack_name,
-                TemplateBody=template,
-                NotificationARNs=[
-                    f"arn:{config.get_partition()}:sns:{self.region}:{self.puppet_account_id}:servicecatalog-puppet-cloudformation-regional-events"
-                ]
-                if self.should_use_sns
-                else [],
-                ShouldDeleteRollbackComplete=self.should_delete_rollback_complete_stacks,
-            )
-            result = cloudformation.describe_stacks(StackName=stack_name,).get(
-                "Stacks"
-            )[0]
-            self.write_output(result)
+            if associations_to_use:
+                tpl = t.Template()
+                tpl.description = f"Associations for {self.portfolio}"
+                for association_to_use in associations_to_use:
+                    logical_name = "".join(
+                        filter(
+                            str.isalnum,
+                            f"{portfolio_id}{association_to_use.split(':')[-1]}",
+                        )
+                    )
+                    tpl.add_resource(
+                        servicecatalog.PortfolioPrincipalAssociation(
+                            logical_name,
+                            PortfolioId=portfolio_id,
+                            PrincipalARN=t.Sub(association_to_use),
+                            PrincipalType="IAM",
+                        )
+                    )
+                template = tpl.to_yaml()
+                cloudformation.create_or_update(
+                    StackName=stack_name,
+                    TemplateBody=template,
+                    NotificationARNs=(
+                        [
+                            f"arn:{config.get_partition()}:sns:{self.region}:{self.puppet_account_id}:servicecatalog-puppet-cloudformation-regional-events"
+                        ]
+                        if self.should_use_sns
+                        else []
+                    ),
+                    ShouldDeleteRollbackComplete=self.should_delete_rollback_complete_stacks,
+                    Tags=self.initialiser_stack_tags,
+                )
+            else:
+                cloudformation.ensure_deleted(StackName=stack_name)
+        self.write_empty_output()

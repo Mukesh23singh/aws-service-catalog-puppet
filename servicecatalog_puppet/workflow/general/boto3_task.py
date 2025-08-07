@@ -1,13 +1,27 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
+import json
+
+import jmespath
 import luigi
 from deepmerge import always_merger
-import jmespath
 
-from servicecatalog_puppet.workflow import tasks
+import servicecatalog_puppet.manifest_utils
+import servicecatalog_puppet.serialisation_utils
+from servicecatalog_puppet import constants
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class Boto3Task(tasks.PuppetTask):
+remove_punctuation_map = dict((ord(char), None) for char in '\/*?:"<>|\n')
+
+
+def hash(what):
+    return json.dumps(
+        servicecatalog_puppet.serialisation_utils.unwrap(what), indent=0
+    ).translate(remove_punctuation_map)
+
+
+class Boto3Task(tasks.TaskWithReference):
     account_id = luigi.Parameter()
     region = luigi.Parameter()
 
@@ -17,8 +31,7 @@ class Boto3Task(tasks.PuppetTask):
     arguments = luigi.DictParameter()
     filter = luigi.Parameter()
 
-    requester_task_id = luigi.Parameter()
-    requester_task_family = luigi.Parameter()
+    cachable_level = constants.CACHE_LEVEL_RUN
 
     def params_for_results_display(self):
         return {
@@ -27,9 +40,8 @@ class Boto3Task(tasks.PuppetTask):
             "client": self.client,
             "use_paginator": self.use_paginator,
             "call": self.call,
-            "requester_task_id": self.requester_task_id,
-            "requester_task_family": self.requester_task_family,
-            "cache_invalidator": self.cache_invalidator,
+            "arguments": hash(self.arguments),
+            "filter": hash(self.filter),
         }
 
     def run(self):

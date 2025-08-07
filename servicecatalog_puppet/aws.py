@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -10,6 +10,7 @@ import yaml
 from betterboto import client as betterboto_client
 
 from servicecatalog_puppet import config, constants
+
 
 logger = logging.getLogger(__file__)
 
@@ -48,7 +49,9 @@ def get_provisioned_product_from_scan(
 ):
     logger.info(f"{logging_prefix}: running get_provisioned_product_from_scan")
     paginator = service_catalog.get_paginator("scan_provisioned_products")
-    pages = paginator.paginate(AccessLevelFilter={"Key": "Account", "Value": "self"},)
+    pages = paginator.paginate(
+        AccessLevelFilter={"Key": "Account", "Value": "self"},
+    )
 
     for page in pages:
         logger.info(
@@ -135,7 +138,9 @@ def get_stack_output_for(cloudformation, stack_name):
 def get_default_parameters_for_stack(cloudformation, stack_name):
     logger.info(f"Getting default parameters for for {stack_name}")
     existing_stack_params_dict = {}
-    summary_response = cloudformation.get_template_summary(StackName=stack_name,)
+    summary_response = cloudformation.get_template_summary(
+        StackName=stack_name,
+    )
     for parameter in summary_response.get("Parameters"):
         existing_stack_params_dict[parameter.get("ParameterKey")] = parameter.get(
             "DefaultValue"
@@ -168,28 +173,32 @@ def provision_product_with_plan(
     params,
     version,
     should_use_sns,
+    tags,
 ):
     uid = f"[{launch_name}] {account_id}:{region}]"
     stack_name = "-".join([constants.PREFIX, account_id, region, launch_name])
     logger.info(f"{uid} :: Checking for an existing plan")
     if puppet_account_id == account_id:
-        provisioned_product_plans = service_catalog.list_provisioned_product_plans_single_page().get(
-            "ProvisionedProductPlans", []
+        provisioned_product_plans = (
+            service_catalog.list_provisioned_product_plans_single_page().get(
+                "ProvisionedProductPlans", []
+            )
         )
     else:
-        provisioned_product_plans = service_catalog.list_provisioned_product_plans_single_page(
-            AccessLevelFilter={"Key": "Account", "Value": "self"}
-        ).get(
-            "ProvisionedProductPlans", []
+        provisioned_product_plans = (
+            service_catalog.list_provisioned_product_plans_single_page(
+                AccessLevelFilter={"Key": "Account", "Value": "self"}
+            ).get("ProvisionedProductPlans", [])
         )
     for provisioned_product_plan in provisioned_product_plans:
         logger.info(
             f"{uid} :: Found plan for {provisioned_product_plan.get('ProvisionProductName')}"
         )
         if provisioned_product_plan.get("ProvisionProductName") == launch_name:
-            f"{uid} :: Found existing plan, going to terminate it"
+            logger.info(f"{uid} :: Found existing plan, going to terminate it")
             service_catalog.delete_provisioned_product_plan(
-                PlanId=provisioned_product_plan.get("PlanId")
+                PlanId=provisioned_product_plan.get("PlanId"),
+                IgnoreErrors=True,
             )
 
     logger.info(f"{uid} :: Creating a plan")
@@ -198,9 +207,12 @@ def provision_product_with_plan(
     provisioning_parameters = []
     for p in params.keys():
         provisioning_parameters.append(
-            {"Key": p, "Value": params.get(p),}
+            {
+                "Key": p,
+                "Value": params.get(p),
+            }
         )
-    response = service_catalog.create_provisioned_product_plan(
+    args = dict(
         PlanName=stack_name,
         PlanType="CLOUDFORMATION",
         PathId=path_id,
@@ -209,20 +221,40 @@ def provision_product_with_plan(
         ProvisioningArtifactId=provisioning_artifact_id,
         ProvisioningParameters=provisioning_parameters,
         Tags=[
-            {"Key": "ServiceCatalogPuppet:Actor", "Value": "Generated",},
-            {"Key": "launch_name", "Value": launch_name,},
-            {"Key": "version", "Value": version,},
+            {
+                "Key": "ServiceCatalogPuppet:Actor",
+                "Value": "Generated",
+            },
+            {
+                "Key": "launch_name",
+                "Value": launch_name,
+            },
+            {
+                "Key": "version",
+                "Value": version,
+            },
         ],
-        NotificationArns=[regional_sns_topic,] if should_use_sns else [],
+        NotificationArns=(
+            [
+                regional_sns_topic,
+            ]
+            if should_use_sns
+            else []
+        ),
     )
+    if tags:
+        args["Tags"].extend(
+            [dict(Key=t.get("key"), Value=t.get("value")) for t in tags]
+        )
+    response = service_catalog.create_provisioned_product_plan(**args)
     logger.info(f"{uid} :: Plan created, waiting for completion")
 
     plan_id = response.get("PlanId")
     plan_status = "CREATE_IN_PROGRESS"
 
     while plan_status == "CREATE_IN_PROGRESS":
-        describe_provisioned_product_plan_response = service_catalog.describe_provisioned_product_plan(
-            PlanId=plan_id
+        describe_provisioned_product_plan_response = (
+            service_catalog.describe_provisioned_product_plan(PlanId=plan_id)
         )
         plan_status = describe_provisioned_product_plan_response.get(
             "ProvisionedProductPlanDetails"
@@ -270,7 +302,10 @@ def provision_product_with_plan(
                 if execute_status in ["AVAILABLE", "EXECUTE_SUCCESS"]:
                     break
                 elif execute_status == "TAINTED":
-                    service_catalog.delete_provisioned_product_plan(PlanId=plan_id)
+                    service_catalog.delete_provisioned_product_plan(
+                        PlanId=plan_id,
+                        IgnoreErrors=True,
+                    )
                     raise Exception(
                         f"{uid} :: Execute failed: {execute_status}: {provisioned_product_detail.get('StatusMessage')}"
                     )
@@ -281,7 +316,10 @@ def provision_product_with_plan(
                 else:
                     time.sleep(5)
 
-            service_catalog.delete_provisioned_product_plan(PlanId=plan_id)
+            service_catalog.delete_provisioned_product_plan(
+                PlanId=plan_id,
+                IgnoreErrors=True,
+            )
             return provisioned_product_id
 
         else:
@@ -330,6 +368,7 @@ def provision_product(
     version,
     should_use_sns,
     execution,
+    tags,
 ):
     partition = config.get_partition()
     uid = f"[{launch_name}] {account_id}:{region}]"
@@ -340,26 +379,45 @@ def provision_product(
                 f"Could not provision {launch_name} in {region} of {account_id}, parameter {p} was None"
             )
         provisioning_parameters.append(
-            {"Key": p, "Value": params.get(p),}
+            {
+                "Key": p,
+                "Value": params.get(p),
+            }
         )
-    provisioned_product_id = (
-        service_catalog.provision_product(
-            ProductId=product_id,
-            ProvisioningArtifactId=provisioning_artifact_id,
-            PathName=path_name,
-            ProvisionedProductName=launch_name,
-            ProvisioningParameters=provisioning_parameters,
-            Tags=[
-                {"Key": "ServiceCatalogPuppet:Actor", "Value": "Generated",},
-                {"Key": "launch_name", "Value": launch_name,},
-                {"Key": "version", "Value": version,},
-            ],
-            NotificationArns=[
+    args = dict(
+        ProductId=product_id,
+        ProvisioningArtifactId=provisioning_artifact_id,
+        PathName=path_name,
+        ProvisionedProductName=launch_name,
+        ProvisioningParameters=provisioning_parameters,
+        Tags=[
+            {
+                "Key": "ServiceCatalogPuppet:Actor",
+                "Value": "Generated",
+            },
+            {
+                "Key": "launch_name",
+                "Value": launch_name,
+            },
+            {
+                "Key": "version",
+                "Value": version,
+            },
+        ],
+        NotificationArns=(
+            [
                 f"arn:{partition}:sns:{region}:{puppet_account_id}:servicecatalog-puppet-cloudformation-regional-events",
             ]
             if should_use_sns
-            else [],
+            else []
+        ),
+    )
+    if tags:
+        args["Tags"].extend(
+            [dict(Key=t.get("key"), Value=t.get("value")) for t in tags]
         )
+    provisioned_product_id = (
+        service_catalog.provision_product(**args)
         .get("RecordDetail")
         .get("ProvisionedProductId")
     )
@@ -401,21 +459,46 @@ def update_provisioned_product(
     params,
     version,
     execution,
+    tags,
 ):
     uid = f"[{launch_name}] {account_id}:{region}]"
     provisioning_parameters = []
     for p in params.keys():
         provisioning_parameters.append(
-            {"Key": p, "Value": params.get(p),}
+            {
+                "Key": p,
+                "Value": params.get(p),
+            }
         )
+
+    args = dict(
+        ProductId=product_id,
+        ProvisioningArtifactId=provisioning_artifact_id,
+        PathName=path_name,
+        ProvisionedProductName=launch_name,
+        ProvisioningParameters=provisioning_parameters,
+        Tags=[
+            {
+                "Key": "ServiceCatalogPuppet:Actor",
+                "Value": "Generated",
+            },
+            {
+                "Key": "launch_name",
+                "Value": launch_name,
+            },
+            {
+                "Key": "version",
+                "Value": version,
+            },
+        ],
+    )
+    if tags:
+        args["Tags"].extend(
+            [dict(Key=t.get("key"), Value=t.get("value")) for t in tags]
+        )
+
     provisioned_product_id = (
-        service_catalog.update_provisioned_product(
-            ProductId=product_id,
-            ProvisioningArtifactId=provisioning_artifact_id,
-            PathName=path_name,
-            ProvisionedProductName=launch_name,
-            ProvisioningParameters=provisioning_parameters,
-        )
+        service_catalog.update_provisioned_product(**args)
         .get("RecordDetail")
         .get("ProvisionedProductId")
     )
@@ -549,3 +632,17 @@ def run_pipeline(pipeline_name, tail):
                 else:
                     time.sleep(5)
         return pipeline_execution_id
+
+
+def get_stack_name_for_pp_id(servicecatalog, pp_id):
+    provisioned_products = servicecatalog.search_provisioned_products(
+        AccessLevelFilter={"Key": "Account", "Value": "self"},
+        Filters={"SearchQuery": ["id:" + pp_id]},
+    ).get("ProvisionedProducts", [])
+    if len(provisioned_products) != 1:
+        raise Exception(
+            f"Search provisioned products for pp_id:{pp_id} resulted in {len(provisioned_products)} matches"
+        )
+    physical_id = provisioned_products[0].get("PhysicalId")
+    stack_name = physical_id.split("/")[1]
+    return stack_name

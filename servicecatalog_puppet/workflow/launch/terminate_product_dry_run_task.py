@@ -1,18 +1,16 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import json
 
 import luigi
 
-from servicecatalog_puppet import aws
-from servicecatalog_puppet import constants
+from servicecatalog_puppet import aws, constants
 from servicecatalog_puppet.workflow.launch import do_terminate_product_task
 
 
 class TerminateProductDryRunTask(do_terminate_product_task.DoTerminateProductTask):
     launch_name = luigi.Parameter()
-    puppet_account_id = luigi.Parameter()
 
     region = luigi.Parameter()
     account_id = luigi.Parameter()
@@ -52,12 +50,6 @@ class TerminateProductDryRunTask(do_terminate_product_task.DoTerminateProductTas
                     default=str,
                 )
             )
-
-    def api_calls_used(self):
-        return [
-            f"servicecatalog.scan_provisioned_products_single_page_{self.account_id}_{self.region}",
-            f"servicecatalog.describe_provisioning_artifact_{self.account_id}_{self.region}",
-        ]
 
     def run(self):
         details = self.load_from_input("details")

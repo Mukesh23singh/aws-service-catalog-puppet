@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import click
@@ -21,4 +21,8 @@ def version():
             )
         )
         response = ssm.get_parameter(Name="service-catalog-puppet-version")
-        click.echo("stack version: {}".format(response.get("Parameter").get("Value"),))
+        click.echo(
+            "stack version: {}".format(
+                response.get("Parameter").get("Value"),
+            )
+        )

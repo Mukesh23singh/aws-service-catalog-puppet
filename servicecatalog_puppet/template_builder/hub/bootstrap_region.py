@@ -1,10 +1,8 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import troposphere as t
-from troposphere import s3
-from troposphere import sns
-from troposphere import ssm
+from troposphere import s3, sns, ssm
 
 
 def get_template(version: str, default_region_value) -> t.Template:

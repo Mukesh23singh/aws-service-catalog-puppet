@@ -1,4 +1,5 @@
  venv
+output.svg
 .idea
 *.iml
 /ServiceCatalogPuppet/
@@ -27,3 +28,12 @@ parameters.yaml
 htmlcov/
 coverage.xml
 .DS_Store
+ignored.html
+*.html
+state1.json
+.fleet
+GetSSMParamTask.zip
+manifest-expanded.yaml
+manifest-task-reference.json
+resources.json
+tasks/

@@ -1,88 +1,75 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
+
+import os
 
 import luigi
 
-from servicecatalog_puppet import constants
-from servicecatalog_puppet.workflow import tasks
-from servicecatalog_puppet.workflow.generate import generate_shares_task
-from servicecatalog_puppet.workflow.manifest import generate_manifest_with_ids_task
-from servicecatalog_puppet.workflow.manifest import manifest_mixin
+from servicecatalog_puppet import (
+    constants,
+    serialisation_utils,
+    task_reference_constants,
+)
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class RunDeployInSpokeTask(tasks.PuppetTask, manifest_mixin.ManifestMixen):
-    manifest_file_path = luigi.Parameter()
-    puppet_account_id = luigi.Parameter()
+class RunDeployInSpokeTask(tasks.TaskWithReference):
     account_id = luigi.Parameter()
+    generate_manifest_ref = luigi.Parameter()
+    cachable_level = constants.CACHE_LEVEL_NO_CACHE
 
     def params_for_results_display(self):
         return {
+            "task_reference": self.task_reference,
             "puppet_account_id": self.puppet_account_id,
             "account_id": self.account_id,
-            "cache_invalidator": self.cache_invalidator,
         }
-
-    def api_calls_used(self):
-        return {
-            f"codebuild.start_build_{self.account_id}": 1,
-        }
-
-    def requires(self):
-        return dict(
-            shares=generate_shares_task.GenerateSharesTask(
-                puppet_account_id=self.puppet_account_id,
-                manifest_file_path=self.manifest_file_path,
-                section=constants.LAUNCHES,
-            ),
-            new_manifest=generate_manifest_with_ids_task.GenerateManifestWithIdsTask(
-                puppet_account_id=self.puppet_account_id,
-                manifest_file_path=self.manifest_file_path,
-            ),
-        )
 
     def run(self):
-        cached_config = self.manifest.get('config_cache')
-        home_region = cached_config.get('home_region')
-        regions = cached_config.get('regions')
-        should_collect_cloudformation_events = cached_config.get('should_collect_cloudformation_events')
-        should_forward_failures_to_opscenter = cached_config.get('should_forward_failures_to_opscenter')
-        should_forward_events_to_eventbridge = cached_config.get('should_forward_events_to_eventbridge')
-        version = cached_config.get('puppet_version')
+        generated_manifest = self.get_output_from_reference_dependency(
+            self.generate_manifest_ref
+        )
+        build_spec = generated_manifest.get("build_spec")
+        spoke_execution_mode_deploy_env = generated_manifest.get(
+            "spoke_execution_mode_deploy_env"
+        )
+        vars = generated_manifest.get("vars")
 
-        signed_url = self.load_from_input("new_manifest").get("signed_url")
-        vars = [
-                    {"name": "VERSION", "value": version, "type": "PLAINTEXT"},
-                    {"name": "MANIFEST_URL", "value": signed_url, "type": "PLAINTEXT"},
-                    {
-                        "name": "PUPPET_ACCOUNT_ID",
-                        "value": self.puppet_account_id,
-                        "type": "PLAINTEXT",
-                    },
-                    {"name": "HOME_REGION", "value": home_region, "type": "PLAINTEXT",},
-                    {
-                        "name": "REGIONS",
-                        "value": ",".join(regions),
-                        "type": "PLAINTEXT",
-                    },
-                    {
-                        "name": "SHOULD_COLLECT_CLOUDFORMATION_EVENTS",
-                        "value": str(should_collect_cloudformation_events),
-                        "type": "PLAINTEXT",
-                    },
-                    {
-                        "name": "SHOULD_FORWARD_EVENTS_TO_EVENTBRIDGE",
-                        "value": str(should_forward_events_to_eventbridge),
-                        "type": "PLAINTEXT",
-                    },
-                    {
-                        "name": "SHOULD_FORWARD_FAILURES_TO_OPSCENTER",
-                        "value": str(should_forward_failures_to_opscenter),
-                        "type": "PLAINTEXT",
-                    },
-                ]
+        bucket = f"sc-puppet-spoke-deploy-{self.puppet_account_id}"
+        with self.hub_client("s3") as s3:
+            task_reference_content = open(
+                self.manifest_task_reference_file_path.replace(
+                    ".json", f"-{self.account_id}.json"
+                ),
+                "r",
+            ).read()
+            key = f"{os.getenv('CODEBUILD_BUILD_NUMBER', '0')}-reference-for-{self.account_id}.json"
+            self.debug(f"Uploading task reference {key} to {bucket}")
+            s3.put_object(
+                Body=task_reference_content,
+                Bucket=bucket,
+                Key=key,
+            )
+            self.debug(f"Generating presigned URL for {key}")
+            reference_signed_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=60 * 60 * 24,
+            )
+            vars.append(
+                {
+                    "name": "TASK_REFERENCE_URL",
+                    "value": reference_signed_url,
+                    "type": "PLAINTEXT",
+                },
+            )
+
         with self.spoke_client("codebuild") as codebuild:
             response = codebuild.start_build(
                 projectName=constants.EXECUTION_SPOKE_CODEBUILD_PROJECT_NAME,
                 environmentVariablesOverride=vars,
+                computeTypeOverride=spoke_execution_mode_deploy_env,
+                buildspecOverride=build_spec,
+                imageOverride=constants.CODEBUILD_DEFAULT_IMAGE,
             )
         self.write_output(dict(account_id=self.account_id, **response))

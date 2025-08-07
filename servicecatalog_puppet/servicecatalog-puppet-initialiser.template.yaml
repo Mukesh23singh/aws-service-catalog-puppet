@@ -4,7 +4,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: |
   Initialiser template used to bring up the install ServiceCatalog-Puppet
-  {"version": "0.116.0", "framework": "servicecatalog-puppet", "role": "initialiser"}
+  {"version": "0.250.0", "framework": "servicecatalog-puppet", "role": "initialiser"}
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -13,35 +13,46 @@ Metadata:
           default: "General"
         Parameters:
           - EnabledRegions
+          - AWSSTSRegionalEndPoints
           - ShouldCollectCloudformationEvents
           - ShouldForwardEventsToEventbridge
           - ShouldForwardFailuresToOpscenter
+          - CodeBuildEnvironmentImage
       - Label:
           default: "Options"
         Parameters:
+          - IsCachingEnabled
           - ShouldValidate
+          - PollForSourceChanges
           - ShouldDeleteRollbackCompleteStacks
       - Label:
           default: "Source Code Management - choose which one of the following sources you will use:"
         Parameters:
           - SCMSourceProvider
       - Label:
-          default: "Option 1: CodeCommit"
+          default: "SCM Option 1: CodeCommit"
         Parameters:
           - SCMRepositoryName
           - SCMBranchName
       - Label:
-          default: "Option 2: CodeStarSourceConnection"
+          default: "SCM Option 2: CodeStarSourceConnection"
         Parameters:
           - SCMConnectionArn
           - SCMFullRepositoryId
           - SCMBranchName
       - Label:
-          default: "Option 3: S3"
+          default: "SCM Option 3: S3"
         Parameters:
           - SCMBucketName
           - SCMObjectKey
           - SCMShouldCreateRepo
+      - Label:
+          default: "SCM Option 4: Custom"
+        Parameters:
+          - SCMCustomSourceActionGitUrl
+          - SCMCustomSourceActionGitWebHookIPAddress
+          - SCMCustomSourceActionCustomActionTypeVersion
+          - SCMCustomSourceActionCustomActionTypeProvider
       - Label:
           default: "Permissions"
         Parameters:
@@ -53,6 +64,11 @@ Metadata:
           - CloudFormationDeployRolePermissionsBoundary
           - PuppetRolePermissionBoundary
       - Label:
+          default: "ServiceCatalog"
+        Parameters:
+          - ShouldShareTagOptions
+          - ShouldSharePrincipals
+      - Label:
           default: "Stacks"
         Parameters:
           - ShouldUseStacksServiceRole
@@ -60,6 +76,7 @@ Metadata:
           default: "Workflow"
         Parameters:
           - DeployEnvironmentComputeType
+          - SpokeDeployEnvironmentComputeType
           - DeployNumWorkers
           - PuppetRoleName
           - PuppetRolePath
@@ -70,6 +87,9 @@ Metadata:
 
 
 Parameters:
+  CodeBuildEnvironmentImage:
+    Type: String
+    Default: "aws/codebuild/standard:7.0"
   EnabledRegions:
     Type: String
     Description: |
@@ -92,6 +112,30 @@ Parameters:
       - True
       - False
     Default: True
+  ShouldShareTagOptions:
+    Type: String
+    Description: |
+      What value should ShareTagOptions be when creating portfolio shares with AWS Service Catalog
+    AllowedValues:
+      - True
+      - False
+    Default: True
+  ShouldSharePrincipals:
+    Type: String
+    Description: |
+      What value should SharePrincipals be when creating portfolio shares with AWS Service Catalog
+    AllowedValues:
+      - True
+      - False
+    Default: True
+  AWSSTSRegionalEndPoints:
+    Type: String
+    Description: |
+      This setting specifies how the SDK determines the AWS service endpoint that it uses to talk to the AWS Security Token Service (AWS STS).
+    AllowedValues:
+      - legacy
+      - regional
+    Default: legacy
   ShouldUseStacksServiceRole:
     Type: String
     Description: |
@@ -132,6 +176,10 @@ Parameters:
     Type: String
     Description: The AWS CodeBuild Environment Compute Type
     Default: BUILD_GENERAL1_SMALL
+  SpokeDeployEnvironmentComputeType:
+    Type: String
+    Description: The AWS CodeBuild Environment Compute Type to use in spokes with spoke execution mode
+    Default: BUILD_GENERAL1_SMALL
   DeployNumWorkers:
     Type: Number
     Description: Number of workers that should be used when running a deploy
@@ -148,6 +196,7 @@ Parameters:
       - CodeCommit
       - S3
       - CodeStarSourceConnection
+      - Custom
     Description: For Github.com, GitHub Enterprise and BitBucket Cloud support use CodeStarSourceConnection
     Default: CodeCommit
   SCMRepositoryName:
@@ -167,6 +216,16 @@ Parameters:
     Type: String
   SCMObjectKey:
     Type: String
+  SCMCustomSourceActionGitUrl:
+    Type: String
+  SCMCustomSourceActionGitWebHookIPAddress:
+    Type: String
+  SCMCustomSourceActionCustomActionTypeVersion:
+    Type: String
+    Default: CustomVersion1
+  SCMCustomSourceActionCustomActionTypeProvider:
+    Type: String
+    Default: CustomProvider1
   SCMShouldCreateRepo:
     Type: String
     AllowedValues:
@@ -181,6 +240,20 @@ Parameters:
       - "false"
     Default: "true"
     Description: "Setting this to true adds a validate stage to the pipeline where the manifest file validated before the deploy occurs."
+  IsCachingEnabled:
+    Type: String
+    AllowedValues:
+      - "True"
+      - "False"
+    Default: "False"
+    Description: "Setting this to true enables the caching of some workflow tasks, reducing overall execution times."
+  PollForSourceChanges:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+    Description: "Should the main pipeline poll SCM for changes"
   ShouldDeleteRollbackCompleteStacks:
     Type: String
     AllowedValues:
@@ -200,6 +273,15 @@ Resources:
       Name: service-catalog-puppet-initialiser-version
       Type: String
       Value: '0.103.1--zzz' #InitialiserVersion
+      Tags:
+        "ServiceCatalogPuppet:Actor": "Framework"
+
+  InitialiserStackNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: service-catalog-puppet-initialiser-stack-name
+      Type: String
+      Value: !Ref AWS::StackName
       Tags:
         "ServiceCatalogPuppet:Actor": "Framework"
 
@@ -231,7 +313,7 @@ Resources:
       Environment:
         Type: linuxContainer
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:4.0
+        Image: !Ref CodeBuildEnvironmentImage
         EnvironmentVariables:
           - Name: VERSION
             Type: PLAINTEXT
@@ -278,6 +360,9 @@ Resources:
           - Name: DEPLOY_ENVIRONMENT_COMPUTE_TYPE
             Type: PLAINTEXT
             Value: !Ref DeployEnvironmentComputeType
+          - Name: SPOKE_DEPLOY_ENVIRONMENT_COMPUTE_TYPE
+            Type: PLAINTEXT
+            Value: !Ref SpokeDeployEnvironmentComputeType
           - Name: DEPLOY_NUM_WORKERS
             Type: PLAINTEXT
             Value: !Ref DeployNumWorkers
@@ -311,15 +396,42 @@ Resources:
           - Name: SCM_OBJECT_KEY
             Type: PLAINTEXT
             Value: !Ref SCMObjectKey
+          - Name: SCM_CUSTOM_SOURCE_ACTION_GIT_URL
+            Type: PLAINTEXT
+            Value: !Ref SCMCustomSourceActionGitUrl
+          - Name: SCM_CUSTOM_SOURCE_ACTION_GIT_WEB_HOOK_IP_ADDRESS
+            Type: PLAINTEXT
+            Value: !Ref SCMCustomSourceActionGitWebHookIPAddress
+          - Name: SCM_CUSTOM_SOURCE_ACTION_CUSTOM_ACTION_TYPE_VERSION
+            Type: PLAINTEXT
+            Value: !Ref SCMCustomSourceActionCustomActionTypeVersion
+          - Name: SCM_CUSTOM_SOURCE_ACTION_CUSTOM_ACTION_TYPE_PROVIDER
+            Type: PLAINTEXT
+            Value: !Ref SCMCustomSourceActionCustomActionTypeProvider
           - Name: SCM_SHOULD_CREATE_REPO
             Type: PLAINTEXT
             Value: !Ref SCMShouldCreateRepo
           - Name: SCT_SHOULD_VALIDATE
             Type: PLAINTEXT
             Value: !Ref ShouldValidate
+          - Name: IS_CACHING_ENABLED
+            Type: PLAINTEXT
+            Value: !Ref IsCachingEnabled
+          - Name: SCT_POLL_FOR_SOURCE_CHANGES
+            Type: PLAINTEXT
+            Value: !Ref PollForSourceChanges
           - Name: SHOULD_DELETE_ROLLBACK_COMPLETE_STACKS
             Type: PLAINTEXT
             Value: !Ref ShouldDeleteRollbackCompleteStacks
+          - Name: SHOULD_SHARE_TAG_OPTIONS
+            Type: PLAINTEXT
+            Value: !Ref ShouldShareTagOptions
+          - Name: SHOULD_SHARE_PRINCIPALS
+            Type: PLAINTEXT
+            Value: !Ref ShouldSharePrincipals
+          - Name: AWS_STS_REGIONAL_ENDPOINTS
+            Type: PLAINTEXT
+            Value: !Ref AWSSTSRegionalEndPoints
       Source:
         Type: NO_SOURCE
         BuildSpec: |
@@ -327,7 +439,7 @@ Resources:
           phases:
             install:
               runtime-versions:
-                python: 3.7
+                python: 3.11
               commands:
                 - pip install ${VERSION}
                 - servicecatalog-puppet --info set-regions ${ENABLED_REGIONS}
@@ -336,6 +448,11 @@ Resources:
                 - servicecatalog-puppet set-config-value should_forward_failures_to_opscenter ${SHOULD_FORWARD_FAILURES_TO_OPSCENTER}
                 - servicecatalog-puppet set-config-value should_use_stacks_service_role ${SHOULD_USE_STACKS_SERVICE_ROLE}
                 - servicecatalog-puppet set-config-value should_delete_rollback_complete_stacks ${SHOULD_DELETE_ROLLBACK_COMPLETE_STACKS}
+                - servicecatalog-puppet set-config-value is_caching_enabled ${IS_CACHING_ENABLED}
+                - servicecatalog-puppet set-config-value spoke_deploy_environment_compute_type ${SPOKE_DEPLOY_ENVIRONMENT_COMPUTE_TYPE}
+                - servicecatalog-puppet set-config-value global_share_tag_options_default ${SHOULD_SHARE_TAG_OPTIONS}
+                - servicecatalog-puppet set-config-value global_share_principals_default ${SHOULD_SHARE_PRINCIPALS}
+                - servicecatalog-puppet set-config-value aws_sts_regional_endpoints ${AWS_STS_REGIONAL_ENDPOINTS}
                 - servicecatalog-puppet bootstrap-spoke ${PUPPET_ACCOUNT_ID} --permission-boundary ${PUPPET_ROLE_PERMISSION_BOUNDARY} --puppet-role-name ${PUPPET_ROLE_NAME} --puppet-role-path ${PUPPET_ROLE_PATH}
             build:
               commands:
@@ -367,7 +484,7 @@ Resources:
       Role: !GetAtt StartInstallRole.Arn
       Handler: "index.handler"
       Description: Lambda for starting Puppet CodeBuild Job
-      Runtime: python3.7
+      Runtime: python3.11
       Timeout: 900
       Code:
         ZipFile: |
@@ -463,13 +580,23 @@ Resources:
           - !Ref CloudFormationDeployRolePermissionsBoundary
           - !Ref PuppetRolePermissionBoundary
           - !Ref DeployEnvironmentComputeType
+          - !Ref SpokeDeployEnvironmentComputeType
           - !Ref DeployNumWorkers
           - !Ref PuppetRoleName
           - !Ref PuppetRolePath
           - !GetAtt InitialiserVersionParam.Value
           - !Ref Version
+          - !Ref SCMCustomSourceActionGitUrl
+          - !Ref SCMCustomSourceActionGitWebHookIPAddress
+          - !Ref SCMCustomSourceActionCustomActionTypeVersion
+          - !Ref SCMCustomSourceActionCustomActionTypeProvider
           - !Ref ShouldValidate
+          - !Ref IsCachingEnabled
+          - !Ref PollForSourceChanges
           - !Ref ShouldDeleteRollbackCompleteStacks
+          - !Ref ShouldShareTagOptions
+          - !Ref ShouldSharePrincipals
+          - !Ref AWSSTSRegionalEndPoints
 Outputs:
   ServiceCatalogPuppetRepoConsoleURL:
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codecommit/repositories/ServiceCatalogPuppet/browse"

@@ -3,7 +3,7 @@ schema: enum("puppet-2019-04-01", required=False)
 
 accounts: list(include('account_or_ou'), min=1)
 
-parameters: map(any(include('default_parameter'), include('ssm_parameter'), include('boto3_parameter')), required=False)
+parameters: map(any(include('default_parameter'), include('ssm_parameter'), include('boto3_parameter'), include('mapping_parameter')), required=False)
 
 mappings: map(include('mapping'), required=False)
 
@@ -27,23 +27,23 @@ code-build-runs: map(include('code-build-run'), required=False)
 ---
 account_or_ou: any(include('account_def'),include('ou'))
 
-account_def: any(include('account'), include('account_with_overwrite'), include('account_with_append'))
+account_def: any(include('account'), include('account_with_overwrite'), include('account_with_append'), include('ou_with_overwrite'), include('ou_with_append'))
 
 account:
-  account_id: include('account_id')
+  account_id: include('account_id_str')
   name: str()
-  default_region: include('region')
-  regions_enabled: list(include('region'))
+  default_region: include('region', required=False)
+  regions_enabled: list(include('region'), required=False)
   tags: list(str())
 
 account_with_overwrite:
-  account_id: include('account_id')
+  account_id: include('account_id_str')
   name: str()
   overwrite: include('append_or_overwrite')
   append: include('append_or_overwrite', required=False)
 
 account_with_append:
-  account_id: include('account_id')
+  account_id: include('account_id_str')
   name: str()
   append: include('append_or_overwrite')
   overwrite: include('append_or_overwrite', required=False)
@@ -51,20 +51,32 @@ account_with_append:
 ou:
   ou: include('ou_path_or_id')
   name: str()
-  default_region: include('region')
-  regions_enabled: list(include('region'))
+  default_region: include('region', required=False)
+  regions_enabled: list(include('region'), required=False)
   tags: list(str())
   exclude: include('exclude', required=False)
 
+ou_with_overwrite:
+  ou: include('ou_path_or_id')
+  name: str()
+  append: include('append_or_overwrite', required=False)
+  overwrite: include('append_or_overwrite')
+
+ou_with_append:
+  ou: include('ou_path_or_id')
+  name: str()
+  append: include('append_or_overwrite')
+  overwrite: include('append_or_overwrite', required=False)
+
 exclude:
-  accounts: list(include('account_id'), required=False)
+  accounts: list(include('account_id_str'), required=False)
   ous: list(include('ou_path_or_id'), required=False)
 
-account_id: str(min=12, max=12)
+#account_id: str(min=12, max=12)
 ou_path_or_id: str()
 
 mapping: map()
-parameter: map(any(include('default_parameter'), include('ssm_parameter'), include('boto3_parameter')))
+parameter: map(any(include('default_parameter'), include('ssm_parameter'), include('boto3_parameter'), include('cloudformation_stack_output_parameter'), include('servicecatalog_provisioned_product_output_parameter'), include('mapping_parameter')))
 
 default_parameter:
   default: str()
@@ -73,16 +85,42 @@ ssm_parameter:
   ssm:
     name: str()
     region: include('region', required=False)
+    path: str(required=False)
+    default_value: str(required=False)
+
+mapping_parameter:
+  mapping: list(str())
+
+account_id_str: any(str(min=12, max=12), int(min=100000000000, max=999999999999))
+
+account_id_func: enum("${AWS::AccountId}")
+
+account_id: any(include('account_id_func'), include('account_id_str'), required=False)
 
 boto3_parameter:
   boto3:
-    account_id: any("${AWS::AccountId}", str(min=12, max=12), required=False)
-    region: any("${AWS::AccountId}", include('region'), required=False)
+    account_id: include('account_id')
+    region: any("${AWS::Region}", include('region'), required=False)
     client: include('client')
     call: str()
-    arguments: map()
+    arguments: map(required=False)
     use_paginator: bool()
     filter: str()
+
+cloudformation_stack_output_parameter:
+  cloudformation_stack_output:
+    account_id: include('account_id')
+    region: any("${AWS::Region}", include('region'), required=False)
+    stack_name: str()
+    output_key: str()
+
+
+servicecatalog_provisioned_product_output_parameter:
+  servicecatalog_provisioned_product_output:
+    account_id: include('account_id')
+    region: any("${AWS::Region}", include('region'), required=False)
+    provisioned_product_name: str()
+    output_key: str()
 
 cfn:
   key: str()
@@ -100,10 +138,11 @@ stack:
   launch_name: str(required=False)
   parameters: include('parameters', required=False)
   depends_on: list(include('depends_on'), required=False)
+  tags: list(include('tags_for_resources'), required=False)
   execution: include('execution', required=False)
   deploy_to: any(include('tags'), include('accounts'))
   outputs: include('outputs', required=False)
-  capabilities: list(enum("CAPABILITY_NAMED_IAM"), required=False)
+  capabilities: list(enum("CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"), required=False)
 
 app:
   name: str()
@@ -113,7 +152,11 @@ app:
   execution: include('execution', required=False)
   deploy_to: any(include('tags'), include('accounts'))
   outputs: include('outputs', required=False)
-  capabilities: list(enum("CAPABILITY_NAMED_IAM"), required=False)
+  capabilities: list(enum("CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"), required=False)
+
+tags_for_resources:
+  key: str()
+  value: str()
 
 outputs:
   ssm: list(include('ssm_output'))
@@ -142,8 +185,11 @@ launch:
   portfolio: str()
   product: str()
   version: str()
+  share_tag_options: bool(required=False)
+  share_principals: bool(required=False)
   parameters: include('parameters', required=False)
   depends_on: list(include('depends_on'), required=False)
+  tags: list(include('tags_for_resources'), required=False)
   execution: include('execution', required=False)
   deploy_to: any(include('tags'), include('accounts'))
   outputs: include('outputs', required=False)
@@ -179,6 +225,8 @@ assertion:
 spoke-local-portfolio:
   portfolio: str()
   sharing_mode: enum('AWS_ORGANIZATIONS', "ACCOUNT", required=False)
+  share_tag_options: bool(required=False)
+  share_principals: bool(required=False)
   product_generation_method: enum('copy', 'import', required=False)
   depends_on: list(include('depends_on'), required=False)
   associations: list(include('associations_arns'), required=False)
@@ -186,11 +234,27 @@ spoke-local-portfolio:
   deploy_to: any(include('tags'), include('accounts'))
 
 constraints:
-  launch: list(include('constraints_launch'))
+  launch: list(include('constraints_launch'), required=False)
+  update_resource: list(include('constraints_update_resource'), required=False)
 
-constraints_launch:
+constraints_launch: any(include('constraints_launch_for_product'), include('constraints_launch_for_products'))
+constraints_update_resource: any(include('constraints_update_resource_for_product'), include('constraints_update_resource_for_products'))
+
+constraints_launch_for_product:
   product: str()
   roles: list(include('constraints_launch_role_arns'))
+
+constraints_launch_for_products:
+  products: any(str(), list(str()))
+  roles: list(include('constraints_launch_role_arns'))
+
+constraints_update_resource_for_product:
+  product: str()
+  tag_update_on_provisioned_product: enum("ALLOWED", "NOT_ALLOWED")
+
+constraints_update_resource_for_products:
+  products: any(str(), list(str()))
+  tag_update_on_provisioned_product: enum("ALLOWED", "NOT_ALLOWED")
 
 associations_arns: str()
 constraints_launch_role_arns: str()
@@ -217,7 +281,7 @@ append_or_overwrite_tags:
 
 depends_on: any(str(), include('dependency'))
 
-dependency: any(include('stack_dependency'), include('launch_dependency'), include('workspace_dependency'), include('lambda_invocation_dependency'), include('code_build_run_dependency'), include('assertion_dependency'), )
+dependency: any(include('stack_dependency'), include('launch_dependency'), include('workspace_dependency'), include('lambda_invocation_dependency'), include('code_build_run_dependency'), include('assertion_dependency'), include('service_control_policy_dependency'), include('tag_policy_dependency'), include('simulate_policy_dependency'), )
 
 stack_dependency:
   name: str()
@@ -249,6 +313,21 @@ assertion_dependency:
   type: enum('assertion')
   affinity: enum('account', 'region', 'account-and-region', 'assertion')
 
+service_control_policy_dependency:
+  name: str()
+  type: enum('service-control-policy')
+  affinity: enum('service-control-policy')
+
+tag_policy_dependency:
+  name: str()
+  type: enum('assertion')
+  affinity: enum('tag-policy')
+
+simulate_policy_dependency:
+  name: str()
+  type: enum('simulate-policy')
+  affinity: enum('account', 'region', 'account-and-region', 'simulate-policy')
+
 tags:
   tags:
     - tag: str()
@@ -261,5 +340,5 @@ accounts:
 
 regions: any(enum('enabled_regions', 'regions_enabled', 'default_region'), include('region'), list(include('region')))
 
-region: enum('us-east-1','us-east-2','us-west-1','us-west-2','af-south-1','ap-east-1','ap-south-1','ap-northeast-3','ap-northeast-2','ap-southeast-1','ap-southeast-2','ap-northeast-1','ca-central-1','eu-central-1','eu-west-1','eu-west-2','eu-south-1','eu-west-3','eu-north-1','me-south-1','sa-east-1','us-gov-east-1','us-gov-west-1','cn-north-1')
+region: enum('${AWS::Region}','us-east-1','us-east-2','us-west-1','us-west-2','af-south-1','ap-east-1','ap-south-1','ap-northeast-3','ap-northeast-2','ap-southeast-1','ap-southeast-2','ap-northeast-1','ca-central-1','eu-central-1','eu-west-1','eu-west-2','eu-south-1','eu-west-3','eu-north-1','me-south-1','sa-east-1','us-gov-east-1','us-gov-west-1','cn-north-1','eu-central-2','ca-west-1')
 client: enum('accessanalyzer','acm','acm-pca','alexaforbusiness','amp','amplify','amplifybackend','apigateway','apigatewaymanagementapi','apigatewayv2','appconfig','appflow','appintegrations','application-autoscaling','application-insights','appmesh','appstream','appsync','athena','auditmanager','autoscaling','autoscaling-plans','backup','batch','braket','budgets','ce','chime','cloud9','clouddirectory','cloudformation','cloudfront','cloudhsm','cloudhsmv2','cloudsearch','cloudsearchdomain','cloudtrail','cloudwatch','codeartifact','codebuild','codecommit','codedeploy','codeguru-reviewer','codeguruprofiler','codepipeline','codestar','codestar-connections','codestar-notifications','cognito-identity','cognito-idp','cognito-sync','comprehend','comprehendmedical','compute-optimizer','config','connect','connect-contact-lens','connectparticipant','cur','customer-profiles','databrew','dataexchange','datapipeline','datasync','dax','detective','devicefarm','devops-guru','directconnect','discovery','dlm','dms','docdb','ds','dynamodb','dynamodbstreams','ebs','ec2','ec2-instance-connect','ecr','ecr-public','ecs','efs','eks','elastic-inference','elasticache','elasticbeanstalk','elastictranscoder','elb','elbv2','emr','emr-containers','endpoints.json','es','events','firehose','fms','forecast','forecastquery','frauddetector','fsx','gamelift','glacier','globalaccelerator','glue','greengrass','greengrassv2','groundstation','guardduty','health','healthlake','honeycode','iam','identitystore','imagebuilder','importexport','inspector','iot','iot-data','iot-jobs-data','iot1click-devices','iot1click-projects','iotanalytics','iotdeviceadvisor','iotevents','iotevents-data','iotfleethub','iotsecuretunneling','iotsitewise','iotthingsgraph','iotwireless','ivs','kafka','kendra','kinesis','kinesis-video-archived-media','kinesis-video-media','kinesis-video-signaling','kinesisanalytics','kinesisanalyticsv2','kinesisvideo','kms','lakeformation','lambda','lex-models','lex-runtime','license-manager','lightsail','location','logs','lookoutvision','machinelearning','macie','macie2','managedblockchain','marketplace-catalog','marketplace-entitlement','marketplacecommerceanalytics','mediaconnect','mediaconvert','medialive','mediapackage','mediapackage-vod','mediastore','mediastore-data','mediatailor','meteringmarketplace','mgh','migrationhub-config','mobile','mq','mturk','mwaa','neptune','network-firewall','networkmanager','opsworks','opsworkscm','organizations','outposts','personalize','personalize-events','personalize-runtime','pi','pinpoint','pinpoint-email','pinpoint-sms-voice','polly','pricing','qldb','qldb-session','quicksight','ram','rds','rds-data','redshift','redshift-data','rekognition','resource-groups','resourcegroupstaggingapi','robomaker','route53','route53domains','route53resolver','s3','s3control','s3outposts','sagemaker','sagemaker-a2i-runtime','sagemaker-edge','sagemaker-featurestore-runtime','sagemaker-runtime','savingsplans','schemas','sdb','secretsmanager','securityhub','serverlessrepo','service-quotas','servicecatalog','servicecatalog-appregistry','servicediscovery','ses','sesv2','shield','signer','sms','sms-voice','snowball','sns','sqs','ssm','sso','sso-admin','sso-oidc','stepfunctions','storagegateway','sts','support','swf','synthetics','textract','timestream-query','timestream-write','transcribe','transfer','translate','waf','waf-regional','wafv2','wellarchitected','workdocs','worklink','workmail','workmailmessageflow','workspaces','xray')

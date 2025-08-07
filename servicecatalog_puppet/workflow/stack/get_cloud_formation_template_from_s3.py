@@ -1,31 +1,52 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
+import os
 
+import botocore
 import luigi
 
-from servicecatalog_puppet.workflow import tasks
+from servicecatalog_puppet import constants
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class GetCloudFormationTemplateFromS3(tasks.PuppetTask):
-    puppet_account_id = luigi.Parameter()
+class GetCloudFormationTemplateFromS3(tasks.TaskWithReference):
     account_id = luigi.Parameter()
+
     bucket = luigi.Parameter()
     key = luigi.Parameter()
+    region = luigi.Parameter()
     version_id = luigi.Parameter()
+    cachable_level = constants.CACHE_LEVEL_NO_CACHE
 
     def params_for_results_display(self):
         return {
+            "task_reference": self.task_reference,
             "bucket": self.bucket,
-            "key": self.key,
+            "key": self.key.replace("-${AWS::Region}", f"-{self.region}"),
+            "region": self.region,
             "version_id": self.version_id,
         }
 
     def run(self):
         with self.hub_client("s3") as s3:
-            p = dict(Bucket=self.bucket, Key=self.key,)
+            regional_template = self.key.replace("-${AWS::Region}", f"-{self.region}")
+            global_template = self.key.replace("-${AWS::Region}", "")
+            p = dict(Bucket=self.bucket)
             if self.version_id != "":
                 p["VersionId"] = self.version_id
-            response = s3.get_object(**p)
-            self.write_output(
-                response.get("Body").read().decode("utf8"), skip_json_dump=True
-            )
+
+            output = self.output_location_non_cached
+            self.info(f"Trying regional template: {regional_template} to {output}")
+            if not os.path.exists(os.path.dirname(output)):
+                os.makedirs(os.path.dirname(output))
+
+            try:
+                s3.download_file(Key=regional_template, Filename=output, **p)
+            except botocore.exceptions.ClientError as e:
+                if "404" == str(e.response["Error"]["Code"]):
+                    self.info(
+                        f"Didnt find regional template: {regional_template}, will try global: {global_template}"
+                    )
+                    s3.download_file(Key=global_template, Filename=output, **p)
+                else:
+                    raise e

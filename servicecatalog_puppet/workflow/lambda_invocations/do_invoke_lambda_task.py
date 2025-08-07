@@ -1,18 +1,15 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import json
 
 import luigi
 
-from servicecatalog_puppet import config
-from servicecatalog_puppet.workflow.general import get_ssm_param_task
-from servicecatalog_puppet.workflow.manifest import manifest_mixin
+from servicecatalog_puppet import config, constants
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class DoInvokeLambdaTask(
-    get_ssm_param_task.PuppetTaskWithParameters, manifest_mixin.ManifestMixen
-):
+class DoInvokeLambdaTask(tasks.TaskWithParameters):
     lambda_invocation_name = luigi.Parameter()
     region = luigi.Parameter()
     account_id = luigi.Parameter()
@@ -21,13 +18,14 @@ class DoInvokeLambdaTask(
     qualifier = luigi.Parameter()
     invocation_type = luigi.Parameter()
 
-    puppet_account_id = luigi.Parameter()
-
-    launch_parameters = luigi.DictParameter()
-    manifest_parameters = luigi.DictParameter()
-    account_parameters = luigi.DictParameter()
-
     manifest_file_path = luigi.Parameter()
+
+    section_name = constants.LAMBDA_INVOCATIONS
+    cachable_level = constants.CACHE_LEVEL_RUN
+
+    @property
+    def item_name(self):
+        return self.lambda_invocation_name
 
     def params_for_results_display(self):
         return {
@@ -35,15 +33,6 @@ class DoInvokeLambdaTask(
             "lambda_invocation_name": self.lambda_invocation_name,
             "region": self.region,
             "account_id": self.account_id,
-            "cache_invalidator": self.cache_invalidator,
-        }
-
-    def requires(self):
-        return dict(ssm_params=self.get_parameters_tasks(),)
-
-    def api_calls_used(self):
-        return {
-            f"lambda.invoke_{self.get_account_used()}_{self.region}": 1,
         }
 
     def run(self):
@@ -73,9 +62,4 @@ class DoInvokeLambdaTask(
                 error_payload = response.get("Payload").read()
                 raise Exception(error_payload)
             else:
-                output = dict(
-                    **self.params_for_results_display(),
-                    payload=payload,
-                    response=response,
-                )
-                self.write_output(output)
+                self.write_empty_output()

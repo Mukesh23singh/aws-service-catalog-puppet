@@ -1,22 +1,16 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
+
+import functools
 
 import luigi
 
-from servicecatalog_puppet import constants
-from servicecatalog_puppet.workflow import dependency
-from servicecatalog_puppet.workflow.general import get_ssm_param_task
-from servicecatalog_puppet.workflow.stack import provisioning_task
-import functools
+from servicecatalog_puppet import aws, constants
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class TerminateStackTask(
-    provisioning_task.ProvisioningTask,
-    dependency.DependenciesMixin,
-    get_ssm_param_task.PuppetTaskWithParameters,
-):
+class TerminateStackTask(tasks.TaskWithReference):
     stack_name = luigi.Parameter()
-    puppet_account_id = luigi.Parameter()
 
     region = luigi.Parameter()
     account_id = luigi.Parameter()
@@ -26,6 +20,7 @@ class TerminateStackTask(
     version_id = luigi.Parameter()
 
     launch_name = luigi.Parameter()
+    stack_set_name = luigi.Parameter()
     capabilities = luigi.ListParameter()
 
     use_service_role = luigi.BoolParameter()
@@ -44,6 +39,7 @@ class TerminateStackTask(
     execution = luigi.Parameter()
 
     try_count = 1
+    cachable_level = constants.CACHE_LEVEL_RUN
 
     def params_for_results_display(self):
         return {
@@ -51,19 +47,12 @@ class TerminateStackTask(
             "stack_name": self.stack_name,
             "account_id": self.account_id,
             "region": self.region,
-            "cache_invalidator": self.cache_invalidator,
         }
-
-    def requires(self):
-        requirements = {"section_dependencies": self.get_section_dependencies()}
-        return requirements
 
     @property
     @functools.lru_cache(maxsize=32)
     def stack_name_to_use(self):
-        if self.launch_name == "":
-            return self.stack_name
-        else:
+        if self.launch_name != "":
             with self.spoke_regional_client("servicecatalog") as servicecatalog:
                 try:
                     pp_id = (
@@ -81,7 +70,43 @@ class TerminateStackTask(
                         return self.stack_name
                     else:
                         raise e
-                return f"SC-{self.account_id}-{pp_id}"
+                stack_name = aws.get_stack_name_for_pp_id(servicecatalog, pp_id)
+                return stack_name
+
+        elif self.stack_set_name != "":
+            with self.spoke_regional_client("cloudformation") as cloudformation:
+                paginator = cloudformation.get_paginator("list_stacks")
+                for page in paginator.paginate():
+                    for summary in page.get("StackSummaries", []):
+                        if summary.get("StackName").startswith(
+                            f"StackSet-{self.stack_set_name}-"
+                        ):
+                            return summary.get("StackName")
+                raise Exception(
+                    f"Could not find a stack beginning with StackSet-{self.stack_set_name}- in {self.region} of {self.account_id}"
+                )
+
+        return self.stack_name
+
+    def terminate_ssm_outputs(self):
+        outputs = (
+            self.get_from_manifest(constants.STACKS, self.stack_name)
+            .get("outputs", {})
+            .get("ssm", [])
+        )
+        for ssm_param_output in outputs:
+            param_name = ssm_param_output.get("param_name")
+            param_name = param_name.replace("${AWS::Region}", self.region)
+            param_name = param_name.replace("${AWS::AccountId}", self.account_id)
+            self.info(f"deleting SSM Param: {param_name}")
+            with self.hub_client("ssm") as ssm:
+                try:
+                    ssm.delete_parameter(
+                        Name=param_name,
+                    )
+                    self.info(f"deleting SSM Param: {param_name}")
+                except ssm.exceptions.ParameterNotFound:
+                    self.info(f"SSM Param: {param_name} not found")
 
     def run(self):
         if self.execution == constants.EXECUTION_MODE_HUB:
@@ -90,4 +115,4 @@ class TerminateStackTask(
         with self.spoke_regional_client("cloudformation") as cloudformation:
             cloudformation.ensure_deleted(StackName=self.stack_name_to_use)
 
-        self.write_output(self.params_for_results_display())
+        self.write_empty_output()

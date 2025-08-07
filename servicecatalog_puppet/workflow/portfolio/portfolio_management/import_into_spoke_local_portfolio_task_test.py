@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 from unittest import skip
@@ -7,14 +7,16 @@ from servicecatalog_puppet.workflow import tasks_unit_tests_helper
 
 
 class ImportIntoSpokeLocalPortfolioTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
-    manifest_file_path = "manifest_file_path"
-    spoke_local_portfolio_name = "spoke_local_portfolio_name"
     account_id = "account_id"
     region = "region"
-    portfolio = "portfolio"
-    organization = "organization"
-    puppet_account_id = "puppet_account_id"
-    sharing_mode = "sharing_mode"
+    portfolio_task_reference = "portfolio_task_reference"
+    hub_portfolio_task_reference = "hub_portfolio_task_reference"
+    portfolio_get_all_products_and_their_versions_ref = (
+        "portfolio_get_all_products_and_their_versions_ref"
+    )
+    portfolio_get_all_products_and_their_versions_for_hub_ref = (
+        "portfolio_get_all_products_and_their_versions_for_hub_ref"
+    )
 
     def setUp(self) -> None:
         from servicecatalog_puppet.workflow.portfolio.portfolio_management import (
@@ -24,14 +26,13 @@ class ImportIntoSpokeLocalPortfolioTaskTest(tasks_unit_tests_helper.PuppetTaskUn
         self.module = import_into_spoke_local_portfolio_task
 
         self.sut = self.module.ImportIntoSpokeLocalPortfolioTask(
-            manifest_file_path=self.manifest_file_path,
-            spoke_local_portfolio_name=self.spoke_local_portfolio_name,
+            **self.get_common_args(),
             account_id=self.account_id,
             region=self.region,
-            portfolio=self.portfolio,
-            organization=self.organization,
-            puppet_account_id=self.puppet_account_id,
-            sharing_mode=self.sharing_mode,
+            portfolio_task_reference=self.portfolio_task_reference,
+            hub_portfolio_task_reference=self.hub_portfolio_task_reference,
+            portfolio_get_all_products_and_their_versions_ref=self.portfolio_get_all_products_and_their_versions_ref,
+            portfolio_get_all_products_and_their_versions_for_hub_ref=self.portfolio_get_all_products_and_their_versions_for_hub_ref,
         )
 
         self.wire_up_mocks()
@@ -39,30 +40,14 @@ class ImportIntoSpokeLocalPortfolioTaskTest(tasks_unit_tests_helper.PuppetTaskUn
     def test_params_for_results_display(self):
         # setup
         expected_result = {
+            "task_reference": self.task_reference,
             "puppet_account_id": self.puppet_account_id,
-            "spoke_local_portfolio_name": self.spoke_local_portfolio_name,
-            "portfolio": self.portfolio,
             "region": self.region,
             "account_id": self.account_id,
-            "cache_invalidator": self.cache_invalidator,
         }
 
         # exercise
         actual_result = self.sut.params_for_results_display()
-
-        # verify
-        self.assertEqual(expected_result, actual_result)
-
-    def test_api_calls_used(self):
-        # setup
-        expected_result = [
-            f"servicecatalog.search_products_as_admin_{self.account_id}_{self.region}",
-            f"servicecatalog.list_provisioning_artifacts_{self.account_id}_{self.region}",
-            f"servicecatalog.associate_product_with_portfolio_{self.account_id}_{self.region}",
-        ]
-
-        # exercise
-        actual_result = self.sut.api_calls_used()
 
         # verify
         self.assertEqual(expected_result, actual_result)

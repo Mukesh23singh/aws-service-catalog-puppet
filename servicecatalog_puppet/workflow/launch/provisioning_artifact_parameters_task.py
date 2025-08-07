@@ -1,25 +1,19 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
+import time
 
 import luigi
 
 from servicecatalog_puppet import constants
-from servicecatalog_puppet.workflow.launch import do_describe_provisioning_parameters
-from servicecatalog_puppet.workflow.launch import provisioning_task
-from servicecatalog_puppet.workflow.portfolio.accessors import (
-    get_version_details_by_names_task,
-)
-from servicecatalog_puppet.workflow.portfolio.associations import (
-    create_associations_in_python_for_portfolio_task,
-)
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-class ProvisioningArtifactParametersTask(provisioning_task.ProvisioningTask):
-    puppet_account_id = luigi.Parameter()
+class ProvisioningArtifactParametersTask(tasks.TaskWithReference):
     portfolio = luigi.Parameter()
     product = luigi.Parameter()
     version = luigi.Parameter()
     region = luigi.Parameter()
+    cachable_level = constants.CACHE_LEVEL_RUN
 
     @property
     def retry_count(self):
@@ -32,49 +26,33 @@ class ProvisioningArtifactParametersTask(provisioning_task.ProvisioningTask):
             "region": self.region,
             "product": self.product,
             "version": self.version,
-            "cache_invalidator": self.cache_invalidator,
         }
 
-    def requires(self):
-        required = dict(
-            details=get_version_details_by_names_task.GetVersionDetailsByNames(
-                manifest_file_path=self.manifest_file_path,
-                puppet_account_id=self.puppet_account_id,
-                portfolio=self.portfolio,
-                product=self.product,
-                version=self.version,
-                account_id=self.single_account
-                if self.execution_mode == constants.EXECUTION_MODE_SPOKE
-                else self.puppet_account_id,
-                region=self.region,
-            ),
-        )
-        if self.execution_mode != constants.EXECUTION_MODE_SPOKE:
-            required[
-                "associations"
-            ] = create_associations_in_python_for_portfolio_task.CreateAssociationsInPythonForPortfolioTask(
-                manifest_file_path=self.manifest_file_path,
-                puppet_account_id=self.puppet_account_id,
-                account_id=self.puppet_account_id,
-                region=self.region,
-                portfolio=self.portfolio,
-            )
-        return required
-
     def run(self):
-        details = self.load_from_input("details")
-        product_id = details.get("product_details").get("ProductId")
-        version_id = details.get("version_details").get("Id")
-        result = yield do_describe_provisioning_parameters.DoDescribeProvisioningParameters(
-            manifest_file_path=self.manifest_file_path,
-            puppet_account_id=self.single_account
-            if self.execution_mode == constants.EXECUTION_MODE_SPOKE
-            else self.puppet_account_id,
-            region=self.region,
-            product_id=product_id,
-            version_id=version_id,
-            portfolio=self.portfolio,
-        )
-        self.write_output(
-            result.open("r").read(), skip_json_dump=True,
-        )
+        with self.hub_regional_client("servicecatalog") as service_catalog:
+            provisioning_artifact_parameters = None
+            retries = 3
+            while retries > 0:
+                try:
+                    provisioning_artifact_parameters = (
+                        service_catalog.describe_provisioning_parameters(
+                            ProductName=self.product,
+                            ProvisioningArtifactName=self.version,
+                            PathName=self.portfolio,
+                        ).get("ProvisioningArtifactParameters", [])
+                    )
+                    retries = 0
+                    break
+                except service_catalog.exceptions.ClientError as ex:
+                    if "S3 error: Access Denied" in str(ex):
+                        self.info("Swallowing S3 error: Access Denied")
+                    else:
+                        raise ex
+                    time.sleep(3)
+                    retries -= 1
+
+            self.write_output(
+                provisioning_artifact_parameters
+                if isinstance(provisioning_artifact_parameters, list)
+                else [provisioning_artifact_parameters]
+            )

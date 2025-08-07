@@ -1,33 +1,27 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import deepdiff
-from datetime import datetime
+import jmespath
 import luigi
+from deepmerge import always_merger
+
+from servicecatalog_puppet import constants
+from servicecatalog_puppet.workflow.dependencies import tasks
 
 
-from servicecatalog_puppet.workflow import dependency
-from servicecatalog_puppet.workflow.assertions import assertion_base_task
-from servicecatalog_puppet.workflow.manifest import manifest_mixin
-from servicecatalog_puppet.workflow.general import boto3_task
-
-
-class DoAssertTask(
-    assertion_base_task.AssertionBaseTask,
-    manifest_mixin.ManifestMixen,
-    dependency.DependenciesMixin,
-):
+class DoAssertTask(tasks.TaskWithParameters):
     assertion_name = luigi.Parameter()
     region = luigi.Parameter()
     account_id = luigi.Parameter()
 
-    puppet_account_id = luigi.Parameter()
     execution = luigi.Parameter()
 
     expected = luigi.DictParameter()
     actual = luigi.DictParameter()
 
     requested_priority = luigi.IntParameter()
+    cachable_level = constants.CACHE_LEVEL_RUN
 
     def params_for_results_display(self):
         return {
@@ -35,27 +29,34 @@ class DoAssertTask(
             "assertion_name": self.assertion_name,
             "region": self.region,
             "account_id": self.account_id,
-            "cache_invalidator": self.cache_invalidator,
         }
 
-    def requires(self):
+    def get_actual_result(self):
         config = self.actual.get("config")
-        return dict(
-            result=boto3_task.Boto3Task(
-                account_id=self.account_id,
-                region=self.region,
-                client=config.get("client"),
-                use_paginator=config.get("use_paginator"),
-                call=config.get("call"),
-                arguments=config.get("arguments"),
-                filter=config.get("filter"),
-                requester_task_id=self.task_id,
-                requester_task_family=self.task_family,
-            )
-        )
+        client = config.get("client")
+        use_paginator = config.get("use_paginator")
+        call = config.get("call")
+        arguments = config.get("arguments")
+        filter = config.get("filter")
+
+        with self.spoke_regional_client(client) as client:
+            if use_paginator:
+                paginator = client.get_paginator(call)
+                result = dict()
+                for page in paginator.paginate(**arguments):
+                    always_merger.merge(result, page)
+            else:
+                f = getattr(client, call)
+                result = f(**arguments)
+
+        actual_result = jmespath.search(filter, result)
+        if isinstance(actual_result, str):
+            return actual_result.strip()
+        else:
+            return actual_result
 
     def run(self):
-        actual_result = self.load_from_input("result")
+        actual_result = self.get_actual_result()
         expected_result = self.expected.get("config").get("value")
         if isinstance(expected_result, tuple):
             expected_result = list(expected_result)
@@ -63,7 +64,8 @@ class DoAssertTask(
             expected_result = expected_result.strip()
 
         ddiff = deepdiff.DeepDiff(actual_result, expected_result, ignore_order=True)
+
         if len(ddiff.keys()) > 0:
             raise Exception(ddiff)
         else:
-            self.write_output(self.params_for_results_display())
+            self.write_empty_output()

@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import json
@@ -6,18 +6,13 @@ import json
 import cfn_tools
 from botocore.exceptions import ClientError
 
-from servicecatalog_puppet import constants, config
-from servicecatalog_puppet.workflow import tasks
+import servicecatalog_puppet.manifest_utils
+import servicecatalog_puppet.serialisation_utils
+from servicecatalog_puppet import constants
 from servicecatalog_puppet.workflow.stack import provision_stack_task
 
 
 class ProvisionStackDryRunTask(provision_stack_task.ProvisionStackTask):
-    def api_calls_used(self):
-        return [
-            f"cloudformation.get_template_summary_{self.account_id}_{self.region}",
-            f"cloudformation.describe_stacks_{self.account_id}_{self.region}",
-        ]
-
     def write_result(
         self, current_version, new_version, effect, current_status, active, notes=""
     ):
@@ -42,7 +37,9 @@ class ProvisionStackDryRunTask(provision_stack_task.ProvisionStackTask):
         with self.spoke_regional_client("cloudformation") as cloudformation:
             try:
                 paginator = cloudformation.get_paginator("describe_stacks")
-                for page in paginator.paginate(StackName=self.stack_name,):
+                for page in paginator.paginate(
+                    StackName=self.stack_name,
+                ):
                     for stack in page.get("Stacks", []):
                         status = stack.get("StackStatus")
                         if status != "DELETE_COMPLETE":
@@ -89,9 +86,15 @@ class ProvisionStackDryRunTask(provision_stack_task.ProvisionStackTask):
         else:
             task_output = dict(
                 **self.params_for_results_display(),
-                account_parameters=tasks.unwrap(self.account_parameters),
-                launch_parameters=tasks.unwrap(self.launch_parameters),
-                manifest_parameters=tasks.unwrap(self.manifest_parameters),
+                account_parameters=servicecatalog_puppet.serialisation_utils.unwrap(
+                    self.account_parameters
+                ),
+                launch_parameters=servicecatalog_puppet.serialisation_utils.unwrap(
+                    self.launch_parameters
+                ),
+                manifest_parameters=servicecatalog_puppet.serialisation_utils.unwrap(
+                    self.manifest_parameters
+                ),
             )
 
             all_params = self.get_parameter_values()
@@ -134,13 +137,13 @@ class ProvisionStackDryRunTask(provision_stack_task.ProvisionStackTask):
                         StackName=self.stack_name,
                     )
                     for parameter in summary_response.get("Parameters"):
-                        existing_stack_params_dict[
-                            parameter.get("ParameterKey")
-                        ] = parameter.get("DefaultValue")
+                        existing_stack_params_dict[parameter.get("ParameterKey")] = (
+                            parameter.get("DefaultValue")
+                        )
                     for stack_param in stack.get("Parameters", []):
-                        existing_stack_params_dict[
-                            stack_param.get("ParameterKey")
-                        ] = stack_param.get("ParameterValue")
+                        existing_stack_params_dict[stack_param.get("ParameterKey")] = (
+                            stack_param.get("ParameterValue")
+                        )
                     template_body = cloudformation.get_template(
                         StackName=self.stack_name, TemplateStage="Original"
                     ).get("TemplateBody")

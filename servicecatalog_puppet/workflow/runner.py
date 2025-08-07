@@ -1,29 +1,51 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import urllib
 from glob import glob
 from pathlib import Path
+from urllib.request import urlretrieve
 
 import click
-import colorclass
 import luigi
 import terminaltables
 import yaml
 from betterboto import client as betterboto_client
-from colorclass import Color
 from luigi import LuigiStatusCode
 
-from servicecatalog_puppet import config
-from servicecatalog_puppet import constants
-from servicecatalog_puppet.workflow import tasks
+from servicecatalog_puppet import (
+    config,
+    constants,
+    environmental_variables,
+    serialisation_utils,
+)
+from servicecatalog_puppet.waluigi import runner_factory
+
 
 logger = logging.getLogger(constants.PUPPET_LOGGER_NAME)
+
+
+def get_build_status_for_in(build_id, spoke_account_id):
+    with betterboto_client.CrossAccountClientContextManager(
+        "codebuild",
+        config.get_puppet_role_arn(spoke_account_id),
+        f"{spoke_account_id}-{config.get_puppet_role_name()}",
+    ) as codebuild_client:
+        response = codebuild_client.batch_get_builds(ids=[build_id])
+        build = response.get("builds")[0]
+        status = build.get("buildStatus")
+        has_failed = status not in ["IN_PROGRESS", "SUCCEEDED"]
+        is_running = status == "IN_PROGRESS"
+        logger.info(
+            f"Checking for status of {build_id} in {spoke_account_id}. status: {status}, has failed: {has_failed}, is running: {is_running}"
+        )
+        return status, build, has_failed, is_running
 
 
 def run_tasks(
@@ -36,23 +58,18 @@ def run_tasks(
     execution_mode="hub",
     on_complete_url=None,
     running_exploded=False,
+    tasks_to_run_filtered=None,
+    manifest_files_path="",
+    manifest_task_reference_file_path="",
 ):
     codebuild_id = os.getenv("CODEBUILD_BUILD_ID", "LOCAL_BUILD")
     if is_list_launches:
         should_use_eventbridge = False
         should_forward_failures_to_opscenter = False
     else:
-        should_use_eventbridge = (
-            config.get_should_use_eventbridge(
-                puppet_account_id, os.environ.get("AWS_DEFAULT_REGION")
-            )
-            and not is_dry_run
-        )
+        should_use_eventbridge = config.get_should_use_eventbridge() and not is_dry_run
         should_forward_failures_to_opscenter = (
-            config.get_should_forward_failures_to_opscenter(
-                puppet_account_id, os.environ.get("AWS_DEFAULT_REGION")
-            )
-            and not is_dry_run
+            config.get_should_forward_failures_to_opscenter() and not is_dry_run
         )
 
     ssm_client = None
@@ -70,60 +87,56 @@ def run_tasks(
         "process_failure",
         "processing_time",
         "broken_task",
+        "traces",
     ]:
-        os.makedirs(Path(constants.RESULTS_DIRECTORY) / result_type)
+        if not os.path.exists(Path(constants.RESULTS_DIRECTORY) / result_type):
+            os.makedirs(Path(constants.RESULTS_DIRECTORY) / result_type)
+
+    if not os.path.exists(Path(constants.OUTPUT)):
+        os.makedirs(Path(constants.OUTPUT))
 
     logger.info(f"About to run workflow with {num_workers} workers")
 
-    if not (running_exploded or is_list_launches):
-        tasks.print_stats()
+    # if not (running_exploded or is_list_launches):
+    # tasks.print_stats()
 
-    if is_list_launches:
-        should_use_shared_scheduler = False
-    else:
-        should_use_shared_scheduler = config.get_should_use_shared_scheduler(
-            puppet_account_id
-        )
+    output_cache_starting_point = config.get_output_cache_starting_point()
+    logger.info("CHECKING output_cache_starting_point")
+    if output_cache_starting_point != "":
+        logger.info("UNZIPPING output_cache_starting_point")
+        dst = "GetSSMParamTask.zip"
+        urlretrieve(output_cache_starting_point, dst)
+        shutil.unpack_archive("GetSSMParamTask.zip", ".", "zip")
 
-    build_params = dict(
-        detailed_summary=True,
-        workers=num_workers,
-        log_level=os.environ.get("LUIGI_LOG_LEVEL", constants.LUIGI_DEFAULT_LOG_LEVEL),
+    threads_or_processes = config.get_scheduler_threads_or_processes()
+    runner = runner_factory.get_runner(threads_or_processes)
+
+    runner.run(
+        num_workers,
+        tasks_to_run_filtered,
+        manifest_files_path,
+        manifest_task_reference_file_path,
+        puppet_account_id,
+        execution_mode,
+        config.get_scheduler_algorithm(),
     )
 
-    if should_use_shared_scheduler:
-        os.system(constants.START_SHARED_SCHEDULER_COMMAND)
-    else:
-        build_params["local_scheduler"] = True
+    drift_token = os.environ.get(environmental_variables.DRIFT_TOKEN)
+    run_token = os.environ.get(environmental_variables.RUN_TOKEN)
 
-    if should_use_shared_scheduler:
-        logger.info(f"should_use_shared_scheduler: {should_use_shared_scheduler}")
-
-    run_result = luigi.build(tasks_to_run, **build_params)
-
-    exit_status_codes = {
-        LuigiStatusCode.SUCCESS: 0,
-        LuigiStatusCode.SUCCESS_WITH_RETRY: 0,
-        LuigiStatusCode.FAILED: 1,
-        LuigiStatusCode.FAILED_AND_SCHEDULING_FAILED: 2,
-        LuigiStatusCode.SCHEDULING_FAILED: 3,
-        LuigiStatusCode.NOT_RUN: 4,
-        LuigiStatusCode.MISSING_EXT: 5,
-    }
-
-    cache_invalidator = os.environ.get("SCT_CACHE_INVALIDATOR")
-
+    has_failures = len(glob("results/failure/*", recursive=True))
     has_spoke_failures = False
 
     if execution_mode == constants.EXECUTION_MODE_HUB:
         logger.info("Checking spoke executions...")
         all_run_deploy_in_spoke_tasks = glob(
-            f"output/RunDeployInSpokeTask/**/{cache_invalidator}.json", recursive=True,
+            f"output/RunDeployInSpokeTask/**/{run_token}.json",  # TODO EPF
+            recursive=True,
         )
         n_all_run_deploy_in_spoke_tasks = len(all_run_deploy_in_spoke_tasks)
         index = 0
         for filename in all_run_deploy_in_spoke_tasks:
-            result = json.loads(open(filename, "r").read())
+            result = serialisation_utils.json_loads(open(filename, "r").read())
             spoke_account_id = result.get("account_id")
             build = result.get("build")
             build_id = build.get("id")
@@ -131,19 +144,14 @@ def run_tasks(
                 f"[{index}/{n_all_run_deploy_in_spoke_tasks}] Checking spoke execution for account: {spoke_account_id} build: {build_id}"
             )
             index += 1
-            with betterboto_client.CrossAccountClientContextManager(
-                "codebuild",
-                config.get_puppet_role_arn(spoke_account_id),
-                f"{spoke_account_id}-{config.get_puppet_role_name()}",
-            ) as codebuild_client:
-                response = codebuild_client.batch_get_builds(ids=[build_id])
-                build = response.get("builds")[0]
-                while build.get("buildStatus") == "IN_PROGRESS":
-                    response = codebuild_client.batch_get_builds(ids=[build_id])
-                    build = response.get("builds")[0]
-                    time.sleep(10)
-                    logger.info("Current status: {}".format(build.get("buildStatus")))
-                if build.get("buildStatus") != "SUCCEEDED":
+
+            status = "IN_PROGRESS"
+
+            while status == "IN_PROGRESS":
+                status, build, has_failed, is_running = get_build_status_for_in(
+                    build_id, spoke_account_id
+                )
+                if has_failed:
                     has_spoke_failures = True
                     params_for_results = dict(
                         account_id=spoke_account_id, build_id=build_id
@@ -164,22 +172,24 @@ def run_tasks(
                         f"results/failure/RunDeployInSpokeTask-{spoke_account_id}.json",
                         "w",
                     ).write(json.dumps(failure))
+                elif is_running:
+                    time.sleep(10)
 
     dry_run_tasks = (
         glob(
-            f"output/ProvisionProductDryRunTask/**/{cache_invalidator}.json",
+            f"output/ProvisionProductDryRunTask/**/{drift_token}.json",  # TODO EPF
             recursive=True,
         )
         + glob(
-            f"output/TerminateProductDryRunTask/**/{cache_invalidator}.json",
+            f"output/TerminateProductDryRunTask/**/{drift_token}.json",  # TODO EPF
             recursive=True,
         )
         + glob(
-            f"output/ProvisionStackDryRunTask/**/{cache_invalidator}.json",
+            f"output/ProvisionStackDryRunTask/**/{drift_token}.json",  # TODO EPF
             recursive=True,
         )
         + glob(
-            f"output/TerminateStackDryRunTask/**/{cache_invalidator}.json",
+            f"output/TerminateStackDryRunTask/**/{drift_token}.json",  # TODO EPF
             recursive=True,
         )
     )
@@ -201,32 +211,20 @@ def run_tasks(
             ]
 
             for filename in dry_run_tasks:
-                result = json.loads(open(filename, "r").read())
-                current_version = (
-                    Color("{green}" + result.get("current_version") + "{/green}")
-                    if result.get("current_version") == result.get("new_version")
-                    else Color("{red}" + result.get("current_version") + "{/red}")
-                )
-
-                active = (
-                    Color("{green}" + str(result.get("active")) + "{/green}")
-                    if result.get("active")
-                    else Color("{red}" + str(result.get("active")) + "{/red}")
-                )
-
-                current_status = (
-                    Color("{green}" + result.get("current_status") + "{/green}")
-                    if result.get("current_status") == "AVAILABLE"
-                    else Color("{red}" + result.get("current_status") + "{/red}")
-                )
+                result = serialisation_utils.json_loads(open(filename, "r").read())
+                current_version = result.get("current_version")
+                active = str(result.get("active"))
+                current_status = result.get("current_status")
 
                 table.append(
                     [
                         result.get("params").get("account_id"),
                         result.get("params").get("region"),
-                        f'Launch:{result.get("params").get("launch_name")}'
-                        if result.get("params").get("launch_name")
-                        else f'Stack:{result.get("params").get("stack_name")}',
+                        (
+                            f'Launch:{result.get("params").get("launch_name")}'
+                            if result.get("params").get("launch_name")
+                            else f'Stack:{result.get("params").get("stack_name")}'
+                        ),
                         result.get("params").get("portfolio"),
                         result.get("params").get("product"),
                         result.get("new_version"),
@@ -240,10 +238,10 @@ def run_tasks(
         elif is_list_launches == "json":
             results = dict()
             for filename in glob(
-                f"output/ProvisionProductDryRunTask/**/{cache_invalidator}.json",
+                f"output/ProvisionProductDryRunTask/**/{drift_token}.json",  # TODO EPF
                 recursive=True,
             ):
-                result = json.loads(open(filename, "r").read())
+                result = serialisation_utils.json_loads(open(filename, "r").read())
                 account_id = result.get("params").get("account_id")
                 region = result.get("params").get("region")
                 launch_name = result.get("params").get("launch_name")
@@ -259,7 +257,13 @@ def run_tasks(
                     status=result.get("current_status"),
                 )
 
-            click.echo(json.dumps(results, indent=4, default=str,))
+            click.echo(
+                json.dumps(
+                    results,
+                    indent=4,
+                    default=str,
+                )
+            )
 
         else:
             raise Exception(f"Unsupported format: {is_list_launches}")
@@ -280,13 +284,15 @@ def run_tasks(
             ]
             table = terminaltables.AsciiTable(table_data)
             for filename in dry_run_tasks:
-                result = json.loads(open(filename, "r").read())
+                result = serialisation_utils.json_loads(open(filename, "r").read())
                 table_data.append(
                     [
                         result.get("effect"),
-                        f'Launch:{result.get("params").get("launch_name")}'
-                        if result.get("params").get("launch_name")
-                        else f'Stack:{result.get("params").get("stack_name")}',
+                        (
+                            f'Launch:{result.get("params").get("launch_name")}'
+                            if result.get("params").get("launch_name")
+                            else f'Stack:{result.get("params").get("stack_name")}'
+                        ),
                         result.get("params").get("account_id"),
                         result.get("params").get("region"),
                         result.get("current_version"),
@@ -297,71 +303,91 @@ def run_tasks(
             click.echo(table.table)
         else:
             table_data = [
-                ["Action", "Params", "Duration"],
+                ["Action", "Params", "Duration", "Result"],
             ]
             table = terminaltables.AsciiTable(table_data)
-            for filename in glob("results/processing_time/*.json"):
+            for filename in glob("results/success/*.json") + glob(
+                "results/failure/*.json"
+            ):
                 result_contents = open(filename, "r").read()
-                result = json.loads(result_contents)
+                result = serialisation_utils.json_loads(result_contents)
                 params = result.get("params_for_results")
+                if not params.get("task_reference"):
+                    params["task_reference"] = result.get("task_params").get(
+                        "task_reference"
+                    )
                 if should_use_eventbridge:
+                    if result.get("task_params"):
+                        del result["task_params"]
                     entries.append(
                         {
-                            # 'Time': ,
                             "Source": constants.SERVICE_CATALOG_PUPPET_EVENT_SOURCE,
-                            "Resources": [
-                                # 'string',
-                            ],
+                            "Resources": [],
                             "DetailType": result.get("task_type"),
-                            "Detail": result_contents,
-                            "EventBusName": constants.EVENT_BUS_IN_SPOKE_NAME
-                            if execution_mode == constants.EXECUTION_MODE_SPOKE
-                            else constants.EVENT_BUS_NAME,
+                            "Detail": json.dumps(result),
+                            "EventBusName": (
+                                constants.EVENT_BUS_IN_SPOKE_NAME
+                                if execution_mode == constants.EXECUTION_MODE_SPOKE
+                                else constants.EVENT_BUS_NAME
+                            ),
                         }
                     )
 
                 params = yaml.safe_dump(params)
 
                 table_data.append(
-                    [result.get("task_type"), params, result.get("duration"),]
+                    [
+                        result.get("task_type"),
+                        params,
+                        result.get("duration"),
+                        result.get("event_type"),
+                    ]
                 )
             click.echo(table.table)
             for filename in glob("results/failure/*.json"):
-                result = json.loads(open(filename, "r").read())
+                result = serialisation_utils.json_loads(open(filename, "r").read())
                 params = result.get("params_for_results")
                 if should_forward_failures_to_opscenter:
-                    title = f"{result.get('task_type')} failed: {params.get('launch_name')} - {params.get('account_id')} - {params.get('region')}"
+                    title = f"{result.get('task_type')} failed: {params.get('task_reference')}"
                     logging.info(f"Sending failure to opscenter: {title}")
                     operational_data = dict(
                         codebuild_id=dict(Value=codebuild_id, Type="SearchableString")
                     )
-                    for param_name, param in params.items():
-                        operational_data[param_name] = {
-                            "Value": json.dumps(param, default=str),
-                            "Type": "SearchableString",
-                        }
-                    description = "\n".join(result.get("exception_stack_trace"))[-1024:]
-                    ssm_client.create_ops_item(
-                        Title=title,
-                        Description=description,
-                        OperationalData=operational_data,
-                        Priority=1,
-                        Source=constants.SERVICE_CATALOG_PUPPET_OPS_CENTER_SOURCE,
-                        Tags=[
-                            {"Key": "ServiceCatalogPuppet:Actor", "Value": "ops-item"},
-                        ],
-                    )
 
-                click.echo(
-                    colorclass.Color(
-                        "{red}" + result.get("task_type") + " failed{/red}"
+                    for param_name in constants.PARAMETERS_TO_TRY_AS_OPERATIONAL_DATA:
+                        if params.get(param_name):
+                            operational_data[param_name] = {
+                                "Value": json.dumps(
+                                    params.get(param_name), default=str
+                                ),
+                                "Type": "SearchableString",
+                            }
+                    description = "\n".join(result.get("exception_stack_trace"))[-1024:]
+                    try:
+                        ssm_client.create_ops_item(
+                            Title=title,
+                            Description=description,
+                            OperationalData=operational_data,
+                            Priority=1,
+                            Source=constants.SERVICE_CATALOG_PUPPET_OPS_CENTER_SOURCE,
+                            Tags=[
+                                {
+                                    "Key": "ServiceCatalogPuppet:Actor",
+                                    "Value": "ops-item",
+                                },
+                            ],
+                        )
+                    except ssm_client.exceptions.OpsItemLimitExceededException:
+                        logging.error(
+                            f"OpsItem: {title} creation failed due to OpsItemLimitExceededException. OperationalData: {operational_data}"
+                        )
+                if "RunDeployInSpoke" in filename:
+                    click.echo(result.get("task_type") + " failed")
+                    click.echo(
+                        f"{yaml.safe_dump({'parameters': result.get('task_params')})}"
                     )
-                )
-                click.echo(
-                    f"{yaml.safe_dump({'parameters': result.get('task_params')})}"
-                )
-                click.echo("\n".join(result.get("exception_stack_trace")))
-                click.echo("")
+                    click.echo("\n".join(result.get("exception_stack_trace")))
+                    click.echo("")
 
             if should_use_eventbridge:
                 logging.info(f"Sending {len(entries)} events to eventbridge")
@@ -370,22 +396,15 @@ def run_tasks(
                     config.get_puppet_role_arn(current_account_id),
                     f"{current_account_id}-{config.get_puppet_role_name()}",
                 ) as events:
-                    for i in range(
-                        0, len(entries), constants.EVENTBRIDGE_MAX_EVENTS_PER_CALL
-                    ):
-                        events.put_events(
-                            Entries=entries[
-                                i : i + constants.EVENTBRIDGE_MAX_EVENTS_PER_CALL
-                            ]
-                        )
+                    batches = generate_batches(entries)
+                    for batch in batches:
+                        events.put_events(Entries=batch)
                         time.sleep(1)
                 logging.info(f"Finished sending {len(entries)} events to eventbridge")
 
-    exit_status_code = exit_status_codes.get(run_result.status)
-
     if on_complete_url:
         logger.info(f"About to post results")
-        if exit_status_code == 0:
+        if not has_failures:
             result = dict(
                 Status="SUCCESS",
                 Reason=f"All tasks run with success: {codebuild_id}",
@@ -410,10 +429,37 @@ def run_tasks(
     if running_exploded:
         pass
     else:
-        if has_spoke_failures:
+        if has_spoke_failures or has_failures:
             sys.exit(1)
         else:
-            sys.exit(exit_status_code)
+            sys.exit(0)
+
+
+def generate_batches(entries):
+    batches = list()
+    current_batch = list()
+    batches.append(current_batch)
+    current_batch_size = 0
+    batch_size_limit = 256000
+    for e in entries:
+        current_entry_size = sys.getsizeof(e.get("Source"))
+        current_entry_size += sys.getsizeof(e.get("DetailType"))
+        current_entry_size += sys.getsizeof(
+            serialisation_utils.json_dumps(e.get("Detail"))
+        )
+
+        if (
+            current_batch_size + current_entry_size > batch_size_limit
+            or len(current_batch) >= 10
+        ):
+            current_batch_size = 0
+            current_batch = list()
+            batches.append(current_batch)
+
+        current_batch.append(e)
+        current_batch_size += current_entry_size
+
+    return batches
 
 
 def run_tasks_for_bootstrap_spokes_in_ou(tasks_to_run, num_workers):
@@ -425,6 +471,7 @@ def run_tasks_for_bootstrap_spokes_in_ou(tasks_to_run, num_workers):
         "process_failure",
         "processing_time",
         "broken_task",
+        "traces",
     ]:
         os.makedirs(Path(constants.RESULTS_DIRECTORY) / result_type)
 
@@ -437,10 +484,8 @@ def run_tasks_for_bootstrap_spokes_in_ou(tasks_to_run, num_workers):
     )
 
     for filename in glob("results/failure/*.json"):
-        result = json.loads(open(filename, "r").read())
-        click.echo(
-            colorclass.Color("{red}" + result.get("task_type") + " failed{/red}")
-        )
+        result = serialisation_utils.json_loads(open(filename, "r").read())
+        click.echo(result.get("task_type") + " failed")
         click.echo(f"{yaml.safe_dump({'parameters': result.get('task_params')})}")
         click.echo("\n".join(result.get("exception_stack_trace")))
         click.echo("")

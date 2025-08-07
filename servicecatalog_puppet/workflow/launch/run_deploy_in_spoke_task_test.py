@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 from unittest import skip
@@ -7,19 +7,24 @@ from servicecatalog_puppet.workflow import tasks_unit_tests_helper
 
 
 class RunDeployInSpokeTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
-    manifest_file_path = "manifest_file_path"
-    puppet_account_id = "puppet_account_id"
+    task_reference = "task_reference"
+    dependencies_by_reference = []
     account_id = "account_id"
+    generate_manifest_ref = "generate_manifest_ref"
 
     def setUp(self) -> None:
+        import os
+        from servicecatalog_puppet import environmental_variables
+
+        os.environ[environmental_variables.REGIONS] = "[]"
         from servicecatalog_puppet.workflow.launch import run_deploy_in_spoke_task
 
         self.module = run_deploy_in_spoke_task
 
         self.sut = self.module.RunDeployInSpokeTask(
-            manifest_file_path=self.manifest_file_path,
-            puppet_account_id=self.puppet_account_id,
+            **self.get_common_args(),
             account_id=self.account_id,
+            generate_manifest_ref=self.generate_manifest_ref,
         )
 
         self.wire_up_mocks()
@@ -27,16 +32,16 @@ class RunDeployInSpokeTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
     def test_params_for_results_display(self):
         # setup
         expected_result = {
+            "task_reference": self.task_reference,
             "puppet_account_id": self.puppet_account_id,
             "account_id": self.account_id,
-            "cache_invalidator": "NOW",
         }
 
         # exercise
         actual_result = self.sut.params_for_results_display()
 
         # verify
-        self.assertDictEqual(expected_result, actual_result)
+        self.assertEqual(expected_result, actual_result)
 
     @skip
     def test_run(self):

@@ -1,12 +1,11 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import json
 
 import luigi
 
-from servicecatalog_puppet import aws
-from servicecatalog_puppet import constants
+from servicecatalog_puppet import aws, constants, serialisation_utils
 from servicecatalog_puppet.workflow.launch import provision_product_task
 
 
@@ -16,17 +15,7 @@ class ProvisionProductDryRunTask(provision_product_task.ProvisionProductTask):
 
     @property
     def output_location(self):
-        return f"output/{self.uid}.{self.output_suffix}"
-
-    def api_calls_used(self):
-        return [
-            f"servicecatalog.scan_provisioned_products_single_page_{self.account_id}_{self.region}",
-            f"servicecatalog.list_launch_paths_{self.account_id}_{self.region}",
-            f"servicecatalog.describe_provisioning_artifact_{self.account_id}_{self.region}",
-            f"cloudformation.describe_provisioning_artifact_{self.account_id}_{self.region}",
-            f"cloudformation.get_template_summary_{self.account_id}_{self.region}",
-            f"cloudformation.describe_stacks_{self.account_id}_{self.region}",
-        ]
+        return f"output/{self.task_reference}.json"
 
     def run(self):
         details = self.load_from_input("details")
@@ -80,7 +69,9 @@ class ProvisionProductDryRunTask(provision_product_task.ProvisionProductTask):
                     with self.input().get("provisioning_artifact_parameters").open(
                         "r"
                     ) as f:
-                        provisioning_artifact_parameters = json.loads(f.read())
+                        provisioning_artifact_parameters = (
+                            serialisation_utils.json_loads(f.read())
+                        )
 
                     params_to_use = {}
                     for p in provisioning_artifact_parameters:
@@ -93,9 +84,12 @@ class ProvisionProductDryRunTask(provision_product_task.ProvisionProductTask):
                         self.info(f"found previous good provision")
                         if provisioned_product_id:
                             self.info(f"checking params for diffs")
+                            pp_stack_name = aws.get_stack_name_for_pp_id(
+                                service_catalog, provisioned_product_id
+                            )
                             provisioned_parameters = aws.get_parameters_for_stack(
                                 cloudformation,
-                                f"SC-{self.account_id}-{provisioned_product_id}",
+                                pp_stack_name,
                             )
                             self.info(f"current params: {provisioned_parameters}")
                             self.info(f"new params: {params_to_use}")
@@ -139,7 +133,8 @@ class ProvisionProductDryRunTask(provision_product_task.ProvisionProductTask):
         self, provisioning_artifact_id, product_id, service_catalog
     ):
         return service_catalog.describe_provisioning_artifact(
-            ProvisioningArtifactId=provisioning_artifact_id, ProductId=product_id,
+            ProvisioningArtifactId=provisioning_artifact_id,
+            ProductId=product_id,
         ).get("ProvisioningArtifactDetail")
 
     def write_result(

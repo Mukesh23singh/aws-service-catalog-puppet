@@ -1,4 +1,4 @@
-#  Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 from unittest import skip
@@ -28,6 +28,7 @@ class BootstrapSpokeAsTaskTest(tasks_unit_tests_helper.PuppetTaskUnitTest):
             permission_boundary=self.permission_boundary,
             puppet_role_name=self.puppet_role_name,
             puppet_role_path=self.puppet_role_path,
+            tag=[],
         )
 
         self.wire_up_mocks()
